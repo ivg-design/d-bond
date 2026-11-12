@@ -15,9 +15,13 @@ final class MenuController: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
-        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem.button {
-            if let image = NSImage(systemSymbolName: "point.3.connected.trianglepath.dotted", accessibilityDescription: "D-Bond") {
+            if let url = Bundle.main.url(forResource: "d-bond-menu-icon", withExtension: "svg"),
+               let image = NSImage(contentsOf: url), image.size.height > 0 {
+                let height: CGFloat = 15
+                image.size = NSSize(width: height * image.size.width / image.size.height, height: height)
+                image.accessibilityDescription = "D-Bond"
                 image.isTemplate = true
                 button.image = image
             } else {
@@ -308,7 +312,7 @@ final class MenuController: NSObject, NSApplicationDelegate {
         do {
             try LoginRegistration.setEnabled(!LoginRegistration.isEnabled)
             refreshMenu()
-            if SMAppService.mainApp.status == .requiresApproval {
+            if !LoginRegistration.usesSupervisor && SMAppService.mainApp.status == .requiresApproval {
                 showError("Start at Login needs approval", "macOS requires approval in System Settings → General → Login Items. D-Bond is not yet enabled to start at login.")
             }
         } catch {
@@ -339,7 +343,8 @@ final class MenuController: NSObject, NSApplicationDelegate {
         case "dot_waiting_for_link": return " · stored, waiting for Dot link"
         case "dot_stored": return " · stored, awaiting Dot"
         case "dot_push": return " · message from Dot"
-        case "dot_unconfirmed": return " · submission unconfirmed"
+        case "dot_unconfirmed": return " · transport unavailable; retrying"
+        case "dot_quarantined": return " · delivery held; inspect receipt"
         case "dot_route_blocked": return " · routing blocked"
         case "local_reply": return " · local demo receipt"
         case "queued": return " · received locally"

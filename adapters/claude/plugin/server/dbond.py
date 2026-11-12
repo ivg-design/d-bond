@@ -545,7 +545,7 @@ def command_ask(args) -> None:
                 result["reply"] = event.get("reply", "")
                 terminal = "dot_replied"
                 break
-            if event.get("state") in ("dot_cancelled", "dot_expired", "dot_route_blocked", "dot_unconfirmed"):
+            if event.get("state") in ("dot_cancelled", "dot_expired", "dot_route_blocked", "dot_quarantined"):
                 terminal = event.get("state")
                 result["detail"] = event.get("reply", "")
                 break
@@ -626,7 +626,7 @@ def command_answer(args) -> None:
                 result["reply"] = event.get("reply", "")
                 terminal = "dot_replied"
                 break
-            if event.get("state") in ("dot_cancelled", "dot_expired", "dot_route_blocked", "dot_unconfirmed"):
+            if event.get("state") in ("dot_cancelled", "dot_expired", "dot_route_blocked", "dot_quarantined"):
                 terminal = event.get("state")
                 result["detail"] = event.get("reply", "")
                 break

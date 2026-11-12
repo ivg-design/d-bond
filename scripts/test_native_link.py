@@ -1,16 +1,123 @@
 """Isolated dispatch and real macOS WAL wake; no production credentials or recipients."""
-import contextlib, json, multiprocessing as mp, pathlib, sqlite3, tempfile, time, unittest, uuid
+import contextlib, datetime as dt, json, multiprocessing as mp, pathlib, sqlite3, tempfile, time, unittest, uuid
 import native_link as n
 class Result:
     def __init__(self,data):self.data=data
     def json(self):return self.data
     def raise_for_status(self):pass
+    status_code=202
 class Client:
     def __init__(self):self.sent=[]
     def post(self,path,json):self.sent.append(json); return Result({'request_id':'req_'+'a'*32})
 def watch(path,tx,parent):
     n.watch(path, tx.send,parent)
 class NativeTest(unittest.TestCase):
+    def test_long_offline_before_post_retries_once_through_native_fixture(self):
+        service='11111111-1111-4111-8111-111111111111'
+        env={'service':service,'id':'offline-case','payload':'ordinary offline message'}
+        now=1_800_000_000
+        with tempfile.TemporaryDirectory() as td:
+            native=pathlib.Path(td)/'native.sqlite';ledger=pathlib.Path(td)/'ledger.sqlite'
+            attempts=pathlib.Path(td)/'attempts.sqlite'
+            with contextlib.closing(sqlite3.connect(native)) as db:
+                db.execute('create table messages(channel,idempotency_key,request_id,reply,reply_cancelled,expires_at,started_at)')
+                db.commit()
+            with contextlib.closing(sqlite3.connect(ledger)) as db:
+                db.execute('create table events(service,id,body)')
+                db.execute('insert into events values(?,?,?)',(service,env['id'],json.dumps({'state':'dispatching','retrying':False,'stages':[{'state':'queued'}]})))
+                db.commit()
+            self.assertIsNone(n.reconcile_before_send(env,native,ledger,now=now,attempts_path=attempts,reply_timeout=3600))
+            self.assertIsNone(n.attempt_record(attempts,n.idempotency_key(service,env['id']))['first_post_at'])
+            # A failed preflight never reaches the POST marker. Even after days
+            # offline, retry is safe because this adapter cannot have sent it.
+            with contextlib.closing(sqlite3.connect(ledger)) as db:
+                db.execute('update events set body=?',(json.dumps({'state':'dispatching','retrying':True,'stages':[
+                    {'state':'queued'},{'state':'dispatching'},{'state':'dot_unconfirmed'},
+                    {'state':'queued'},{'state':'dispatching'}]}),));db.commit()
+            later=now+3*86400
+            self.assertIsNone(n.reconcile_before_send(env,native,ledger,now=later,attempts_path=attempts,reply_timeout=3600))
+            class NativeHTTPFixture:
+                def __init__(self):self.posts=0
+                def post(self,path,json):
+                    self.posts+=1
+                    with contextlib.closing(sqlite3.connect(native)) as db:
+                        db.execute('insert into messages values(?,?,?,?,?,?,?)',
+                                   ('d-bond',json['idempotency_key'],'req_'+'b'*32,None,0,later+3600,None))
+                        db.commit()
+                    return Result({'request_id':'req_'+'b'*32})
+            client=NativeHTTPFixture()
+            result=n.send(client,env,{'blocked':False,'active':1},native,
+                          before_post=lambda:n.record_attempt(attempts,n.idempotency_key(service,env['id']),later))
+            self.assertEqual(result['state'],'dot_stored')
+            self.assertEqual(client.posts,1)
+            self.assertEqual(n.reconcile_before_send(env,native,ledger,now=later+1,attempts_path=attempts,reply_timeout=3600)['reply'],'req_'+'b'*32)
+
+    def test_post_start_missing_row_retries_only_within_configured_live_window(self):
+        service='11111111-1111-4111-8111-111111111111'
+        env={'service':service,'id':'post-start','payload':'generic message'}
+        now=1_800_000_000
+        with tempfile.TemporaryDirectory() as td:
+            native=pathlib.Path(td)/'native.sqlite';ledger=pathlib.Path(td)/'ledger.sqlite';attempts=pathlib.Path(td)/'attempts.sqlite'
+            with contextlib.closing(sqlite3.connect(native)) as db:
+                db.execute('create table messages(channel,idempotency_key,request_id,reply,reply_cancelled,expires_at,started_at)');db.commit()
+            with contextlib.closing(sqlite3.connect(ledger)) as db:
+                db.execute('create table events(service,id,body)')
+                db.execute('insert into events values(?,?,?)',(service,env['id'],json.dumps({'state':'dispatching','retrying':True,'stages':[
+                    {'state':'queued'},{'state':'dispatching','at':dt.datetime.fromtimestamp(now,dt.timezone.utc).isoformat()},
+                    {'state':'queued'},{'state':'dispatching'}]})));db.commit()
+            n.record_attempt(attempts,n.idempotency_key(service,env['id']),now)
+            self.assertIsNone(n.reconcile_before_send(env,native,ledger,now=now+3599,attempts_path=attempts,reply_timeout=3600))
+            self.assertEqual(n.reconcile_before_send(env,native,ledger,now=now+3600,attempts_path=attempts,reply_timeout=3600)['state'],'dot_quarantined')
+    def test_retry_reconciles_native_row_and_quarantines_missing_ambiguous_row(self):
+        service='11111111-1111-4111-8111-111111111111'
+        env={'service':service,'id':'retry-case','payload':{'text':'ordinary offline message'}}
+        now=1_800_000_000
+        with tempfile.TemporaryDirectory() as td:
+            native=pathlib.Path(td)/'native.sqlite'; ledger=pathlib.Path(td)/'ledger.sqlite'
+            with contextlib.closing(sqlite3.connect(native)) as db:
+                db.execute('create table messages(channel,idempotency_key,request_id,reply,reply_cancelled,expires_at,started_at)')
+                db.execute('insert into messages values(?,?,?,?,?,?,?)',
+                           ('d-bond',n.idempotency_key(service,env['id']),'req_'+'a'*32,None,0,now+60,None))
+                db.commit()
+            with contextlib.closing(sqlite3.connect(ledger)) as db:
+                db.execute('create table events(service,id,body)')
+                event={'state':'dispatching','retrying':True,'stages':[
+                    {'state':'queued'},{'state':'dispatching'},{'state':'dot_unconfirmed'},
+                    {'state':'queued'},{'state':'dispatching'}]}
+                db.execute('insert into events values(?,?,?)',(service,env['id'],json.dumps(event)))
+                db.commit()
+            self.assertEqual(n.reconcile_before_send(env,native,ledger,now=now),
+                             {'state':'dot_stored','reply':'req_'+'a'*32})
+            with contextlib.closing(sqlite3.connect(native)) as db:
+                db.execute('update messages set expires_at=?',(now-1,));db.commit()
+            self.assertEqual(n.reconcile_before_send(env,native,ledger,now=now)['state'],'dot_expired')
+            with contextlib.closing(sqlite3.connect(native)) as db:
+                db.execute('delete from messages');db.commit()
+            # The native row may have been pruned. An arbitrary one-hour cutoff
+            # must not turn this generic message into a false expiry or new POST.
+            self.assertEqual(n.reconcile_before_send(env,native,ledger,now=now)['state'],'dot_quarantined')
+            with contextlib.closing(sqlite3.connect(ledger)) as db:
+                safe={'state':'dispatching','retrying':True,'stages':[
+                    {'state':'queued'},{'state':'dispatching'},
+                    {'state':'dot_route_blocked'},{'state':'queued'},{'state':'dispatching'}]}
+                db.execute('update events set body=?',(json.dumps(safe),));db.commit()
+            self.assertIsNone(n.reconcile_before_send(env,native,ledger,now=now))
+
+
+    def test_known_permanent_post_errors_do_not_raise_for_automatic_retry(self):
+        service='11111111-1111-4111-8111-111111111111'
+        env={'service':service,'id':'post-case','payload':'hello'}
+        route={'blocked':False,'active':1}
+        class Rejected:
+            status_code=422
+            def json(self):return {'code':'invalid_message'}
+            def raise_for_status(self):raise AssertionError('permanent failure retried')
+        class RejectingClient:
+            def post(self,path,json):return Rejected()
+        self.assertEqual(n.send(RejectingClient(),env,route)['state'],'dot_quarantined')
+        self.assertEqual(n.post_failure(type('Response',(),{'status_code':401,'json':lambda self:{'code':'unauthorized'}})())['state'],'dot_route_blocked')
+        self.assertIsNone(n.post_failure(type('Response',(),{'status_code':409,'json':lambda self:{'code':'authorization_changed'}})()))
+        self.assertIsNone(n.post_failure(type('Response',(),{'status_code':503,'json':lambda self:{'code':'server_error'}})()))
     def make_service_ledger(self,path,source,recipient,*,source_paused=None,recipient_paused=None,source_destination='dot',recipient_destination='dot',include_recipient=True):
         with contextlib.closing(sqlite3.connect(path)) as db:
             db.execute('create table if not exists services(id text primary key, body blob not null)')

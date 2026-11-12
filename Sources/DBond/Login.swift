@@ -1,21 +1,66 @@
 import AppKit
 import ServiceManagement
 
-/// Controls the user's explicit Start at Login preference for the installed app.
-/// The login item is the app itself; no helper process or credentials are added.
+/// Controls the installed launchd job, falling back to the original app login
+/// registration for builds that have not been installed with the supervisor.
 @MainActor
 enum LoginRegistration {
+    private static var label: String { "\(Bundle.main.bundleIdentifier ?? "design.ivg.dbond").supervisor" }
+    private static var agentURL: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/LaunchAgents/\(label).plist")
+    }
+    private static var domain: String { "gui/\(getuid())" }
+    static var usesSupervisor: Bool { FileManager.default.fileExists(atPath: agentURL.path) }
+
     static var isEnabled: Bool {
-        SMAppService.mainApp.status == .enabled
+        if usesSupervisor {
+            guard launchctl("print", "\(domain)/\(label)").status == 0 else { return false }
+            let result = launchctl("print-disabled", domain)
+            guard result.status == 0 else { return false }
+            return !result.output.contains("\"\(label)\" => disabled")
+        }
+        return SMAppService.mainApp.status == .enabled
     }
 
     static func setEnabled(_ enabled: Bool) throws {
+        if usesSupervisor {
+            guard launchctl("print", "\(domain)/\(label)").status == 0 else {
+                throw NSError(domain: "D-Bond Login", code: 1, userInfo: [
+                    NSLocalizedDescriptionKey: "D-Bond's launch job is installed but not loaded. Run the installer again after quitting the app."
+                ])
+            }
+            let result = launchctl(enabled ? "enable" : "disable", "\(domain)/\(label)")
+            guard result.status == 0 else {
+                throw NSError(domain: "D-Bond Login", code: Int(result.status), userInfo: [
+                    NSLocalizedDescriptionKey: result.output.isEmpty ? "launchctl could not change D-Bond's login setting." : result.output
+                ])
+            }
+            return
+        }
         if enabled {
             if SMAppService.mainApp.status != .enabled {
                 try SMAppService.mainApp.register()
             }
         } else if SMAppService.mainApp.status == .enabled {
             try SMAppService.mainApp.unregister()
+        }
+    }
+
+    private static func launchctl(_ arguments: String...) -> (status: Int32, output: String) {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+        process.arguments = arguments
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        do {
+            try process.run()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            return (process.terminationStatus, String(decoding: data, as: UTF8.self))
+        } catch {
+            return (-1, error.localizedDescription)
         }
     }
 }

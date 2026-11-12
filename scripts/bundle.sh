@@ -17,6 +17,11 @@ cp "$product_dir/DBond" "$BIN_DIR/DBond"
 cp "$ROOT/scripts/native_link.py" "$RES_DIR/"
 install -m 755 "$ROOT/adapters/cli/dbond.py" "$RES_DIR/dbond"
 install -m 644 "$ROOT/adapters/cli/owner.py" "$RES_DIR/owner.py"
+icon_dir="$(mktemp -d)"
+trap 'rm -rf "$icon_dir"' EXIT
+swift "$ROOT/scripts/make_app_icon.swift" "$ROOT/Assets/d-bond-app-icon.png" "$icon_dir/D-Bond.iconset"
+iconutil -c icns "$icon_dir/D-Bond.iconset" -o "$RES_DIR/D-Bond.icns"
+install -m 644 "$ROOT/Assets/d-bond-menu-icon.svg" "$RES_DIR/d-bond-menu-icon.svg"
 cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -24,6 +29,7 @@ cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
 <dict>
   <key>CFBundleExecutable</key><string>DBond</string>
   <key>CFBundleIdentifier</key><string>design.ivg.dbond</string>
+  <key>CFBundleIconFile</key><string>D-Bond.icns</string>
   <key>CFBundleName</key><string>D-Bond</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>0.2.0</string>

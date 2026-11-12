@@ -28,10 +28,16 @@ func sendViaDot(service:String,id:String,payload:Data,onUpdate:@escaping (String
     guard p.terminationStatus==0, let obj=try JSONSerialization.jsonObject(with:bytes) as? [String:String], let state=obj["state"],let reply=obj["reply"] else { throw Fault.message("Native submission unconfirmed.") }
     return (state,reply)
 }
-func observeNativeDot(_ onUpdate:@escaping (String,String,String,String)->Bool) -> Process? {
+func observeNativeDot(onExit: @escaping () -> Void, _ onUpdate:@escaping (String,String,String,String)->Bool) -> Process? {
     guard let (p,out)=try? nativeCommand("observe") else { return nil }
     do { try p.run() } catch { return nil }
     DispatchQueue.global(qos:.utility).async {
+        // Drain any final committed receipts before opening a replacement observer.
+        defer {
+            if p.isRunning { p.terminate() }
+            p.waitUntilExit()
+            onExit()
+        }
         var buffer=Data()
         while true {
             let chunk=out.fileHandleForReading.availableData; if chunk.isEmpty { break }; buffer.append(chunk)

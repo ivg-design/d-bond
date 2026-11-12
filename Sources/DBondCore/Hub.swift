@@ -48,12 +48,28 @@ public final class Hub: @unchecked Sendable {
             server = try LocalHTTP(port)
         } catch { close(descriptor); throw error }
         ownerLock = descriptor
-        for i in ledger.events.indices where ["sending_banner", "dispatching"].contains(ledger.events[i].state) {
-            ledger.seq += 1; ledger.events[i].sequence = ledger.seq; ledger.events[i] = Self.marked(ledger.events[i],"outcome_unknown")
-            ledger.events[i].reply = "Delivery was interrupted after dispatch began. Check the destination before sending another ID."
-            if let sx = ledger.services.firstIndex(where: { $0.id == ledger.events[i].service }) { ledger.services[sx].state = "outcome_unknown" }
+        var recovery = ledger
+        for i in ledger.events.indices {
+            let event = ledger.events[i]
+            guard let service = ledger.services.first(where: { $0.id == event.service }) else { continue }
+            let isDot = event.route == "dot_return" || service.destination == "dot"
+            if isDot, !event.id.hasPrefix("@dot:"), !event.payload.isEmpty,
+               ["dispatching", "dot_unconfirmed", "outcome_unknown"].contains(event.state) {
+                recovery.events[i] = Self.marked(event, "queued")
+                recovery.events[i].retrying = true
+            } else if ["sending_banner", "dispatching"].contains(event.state) {
+                recovery.seq += 1
+                recovery.events[i] = Self.marked(event, "outcome_unknown")
+                recovery.events[i].sequence = recovery.seq
+                recovery.events[i].reply = "Delivery was interrupted. Check the destination for a receipt."
+            } else {
+                continue
+            }
+            if let index = ledger.services.firstIndex(where: { $0.id == service.id }) {
+                recovery.services[index].state = recovery.events[i].state
+            }
         }
-        if ledger.events.contains(where: { $0.state == "outcome_unknown" }) { try persist(ledger) }
+        if recovery.events != ledger.events { try persist(recovery) }
         server.start { [weak self] req in self?.route(req) ?? HTTPReply(503,[:]) }
         for event in ledger.events where event.state == "queued" && ledger.services.contains(where: { $0.id == event.service && $0.paused != true }) {
             if event.id.hasPrefix("@dot:") { publishDotPush(service:event.service,id:event.id) }
@@ -62,12 +78,20 @@ public final class Hub: @unchecked Sendable {
     }
     deinit { if nativeWorker?.isRunning == true { nativeWorker?.terminate() }; close(ownerLock) }
     private func startNativeObserver() {
-        nativeWorker = observeNativeDot { [weak self] service,id,state,detail in
+        nativeWorker = observeNativeDot(onExit: { [weak self] in
+            self?.restartNativeObserver()
+        }) { [weak self] service,id,state,detail in
             guard let self else { return true }
             if state == "dot_push" { return self.recordDotPush(service:service,sourceID:id,detail:detail) }
             return self.recordDotReceipt(service:service,id:id,state:state,reply:detail)
         }
+        if nativeWorker == nil { restartNativeObserver() }
     }
+
+    private func restartNativeObserver() {
+        work.asyncAfter(deadline: .now() + 2) { [weak self] in self?.startNativeObserver() }
+    }
+
     private var base:String { "http://127.0.0.1:\(server.port)" }
     private func endpoint(_ id:String) -> String { base + "/v1/services/" + id + "/events" }
     private static func digest(_ data:Data) -> String { SHA256.hash(data:data).map { String(format:"%02x",$0) }.joined() }
@@ -302,7 +326,7 @@ public final class Hub: @unchecked Sendable {
             }
         }
     }
-    private func schedule(_ e:Event) {
+    private func schedule(_ e:Event, retryDelay: TimeInterval = 2) {
         work.async { [weak self] in
             guard let self else { return }
             lock.lock()
@@ -316,13 +340,18 @@ public final class Hub: @unchecked Sendable {
                 lock.unlock(); if destination == "dot" { dotSlots.signal() }; return
             }
             let herald = destination == "herald"
-            var claim = ledger; claim.events[index] = Self.marked(claim.events[index],herald ? "sending_banner" : "dispatching")
+            var claim = ledger
+            if retryDelay > 2 {
+                claim.events[index].state = "dispatching"
+            } else {
+                claim.events[index] = Self.marked(claim.events[index],herald ? "sending_banner" : "dispatching")
+            }
             do { try persist(claim) } catch { lock.unlock(); if destination == "dot" { dotSlots.signal() }; return }
             lock.unlock()
             if destination == "dot" {
                 DispatchQueue.global(qos:.utility).async { [weak self] in
                     defer { self?.dotSlots.signal() }
-                    self?.deliverToDot(e)
+                    self?.deliverToDot(e, retryDelay: retryDelay)
                 }
                 return
             }
@@ -350,7 +379,7 @@ public final class Hub: @unchecked Sendable {
     private static func dotRank(_ state:String) -> Int {
         switch state {
         case "dot_acknowledged": return 3
-        case "dot_replied", "dot_cancelled", "dot_expired": return 4
+        case "dot_replied", "dot_cancelled", "dot_expired", "dot_quarantined": return 4
         case "dot_stored", "dot_waiting_for_link", "dot_route_blocked": return 1
         default: return 0
         }
@@ -361,12 +390,24 @@ public final class Hub: @unchecked Sendable {
               let sx = ledger.services.firstIndex(where: { $0.id == service && ($0.destination == "dot" || ledger.events[ix].route == "dot_return") }) else { return true }
         let old = ledger.events[ix]
         guard Self.dotRank(state) >= Self.dotRank(old.state),
-              (old.retrying == true || !(ledger.receipts ?? []).contains(where: { $0.service == service && $0.id == id && $0.state == state })),
               !(Self.dotRank(old.state) == 4 && old.state != state) else { return true }
+        let previous = (ledger.receipts ?? []).contains { $0.service == service && $0.id == id && $0.state == state }
+        if previous {
+            // Reconcile a repeated receipt after a retry without publishing it twice.
+            // The transient state still must leave dispatching so another retry can run.
+            if old.state == "dispatching" || old.state == "queued" {
+                var next = ledger
+                next.events[ix].state = state
+                next.events[ix].retrying = false
+                next.services[sx].state = state
+                do { try persist(next); lock.broadcast() } catch { return false }
+            }
+            return true
+        }
         var next = ledger; next.seq += 1
         next.receipts = (next.receipts ?? []) + [Receipt(service:service,id:id,sequence:next.seq,state:state,reply:reply)]
-        next.events[ix] = Self.marked(next.events[ix],state,basis:state.hasPrefix("dot_") && !["dot_unconfirmed","dot_route_blocked","dot_waiting_for_link","dot_stored"].contains(state) ? "native_observed" : "broker_recorded"); next.events[ix].sequence = next.seq; next.events[ix].reply = nil; next.events[ix].retrying = false
-        if ["dot_replied","dot_cancelled","dot_expired"].contains(state) {
+        next.events[ix] = Self.marked(next.events[ix],state,basis:state.hasPrefix("dot_") && !["dot_unconfirmed","dot_route_blocked","dot_waiting_for_link","dot_stored","dot_quarantined"].contains(state) ? "native_observed" : "broker_recorded"); next.events[ix].sequence = next.seq; next.events[ix].reply = nil; next.events[ix].retrying = false
+        if ["dot_replied","dot_cancelled","dot_expired","dot_quarantined"].contains(state) {
             if next.events[ix].payloadDigest == nil { next.events[ix].payloadDigest = Self.digest(next.events[ix].payload) }
             next.events[ix].payload = Data()
         }
@@ -466,14 +507,27 @@ public final class Hub: @unchecked Sendable {
             if let returnEvent, next.services[sx].paused != true { schedule(returnEvent) }
         } catch { /* Remains indeterminate on restart; never repeat the Herald side effect automatically. */ }
     }
-    private func deliverToDot(_ e:Event) {
+    private func deliverToDot(_ e:Event, retryDelay: TimeInterval) {
         do {
             let result = try dotSender(e.service,e.id,e.payload) { [weak self] state,reply in
                 _ = self?.recordDotReceipt(service:e.service,id:e.id,state:state,reply:reply)
             }
             recordDotReceipt(service:e.service,id:e.id,state:result.state,reply:result.reply)
         } catch {
-            recordDotReceipt(service:e.service,id:e.id,state:"dot_unconfirmed",reply:"Dot delivery could not be confirmed. Check the native route before trying another ID.")
+            recordDotReceipt(service:e.service,id:e.id,state:"dot_unconfirmed",reply:"Waiting for the local Dot transport to recover.")
+            work.asyncAfter(deadline: .now() + retryDelay) { [weak self] in
+                guard let self else { return }
+                lock.lock()
+                defer { lock.unlock() }
+                guard let i = ledger.events.firstIndex(where: { $0.service == e.service && $0.id == e.id }),
+                      ledger.events[i].state == "dot_unconfirmed",
+                      ledger.services.contains(where: { $0.id == e.service && $0.paused != true }) else { return }
+                var next = ledger
+                next.events[i].state = "queued"
+                next.events[i].retrying = true
+                guard (try? persist(next)) != nil else { return }
+                schedule(next.events[i], retryDelay: min(60, retryDelay * 2))
+            }
         }
     }
 }

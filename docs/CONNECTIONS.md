@@ -4,10 +4,11 @@ On a Mac with Swift 5.9+ and macOS 13 or later, run the following from the sourc
 
 ```sh
 bash scripts/install_app.sh
-open "$HOME/Applications/D-Bond.app"
 ```
 
-The app runs in the menu bar. Opening it again brings up **Connections**. Choose **Start at Login** in the menu if you want it to run after sign-in. A fresh installation can test **Local demo echo** immediately. To reach your actual Dot you also need your own compatible Dot Bridge Transport and its single native `d-bond` subscription. Installing the Mac app alone doesn't create that account connection.
+Quit an older running D-Bond before upgrading. If it was already listed under **System Settings → General → Login Items & Extensions → Open at Login**, remove that older entry before installing; the installer starts one per-user launchd job instead. The job opens D-Bond at login and restarts it after an abnormal exit. **Quit D-Bond** exits normally and keeps it stopped until the next login. **Start at Login** in the app menu enables or disables the installed job. The installer does not remove pairings, credentials or receipts.
+
+The app runs in the menu bar. Opening it again brings up **Connections**. A fresh installation can test **Local demo echo** immediately. To reach your actual Dot you also need your own compatible Dot Bridge Transport and its single native `d-bond` subscription. Installing the Mac app alone doesn't create that account connection.
 
 ## Connect a service
 
@@ -27,3 +28,10 @@ In **Connections**, choose **Rules** beside the service, add a rule, paste the i
 - A **queued** timestamp means the local Mac stored the event. **dot_stored** means the transport accepted it into storage.
 - **dot_acknowledged** and **dot_replied** are separate. The displayed local times show when D-Bond observed those changes; they do not establish when a person saw a banner or a second app acted.
 - An empty stage is unknown, not zero elapsed time. Older events may have no timestamp history. Reconcile an uncertain send using the original event ID.
+
+
+## After an interruption
+
+The service keeps the same endpoint, credential and event ID across restarts. Reopen the receipt stream with the last sequence your service durably handled. If a POST response is lost, resend the same ID and unchanged payload; creating a new ID starts a new message. The broker retries temporary transport failures with backoff. It checks the native request store before sending again. A rejected or unsafe-to-replay message has an explicit receipt. A paused or deleted link does not silently become active.
+
+The native Dot subscription and its account grant are separate from your service pairing. The host can renew them automatically; an owner revocation, a disabled grant, or a missed host renewal can still prevent a wake. While Dot is offline, its stored messages are subject to the native host's expiry. The broker can restart the Mac app and its observer; it cannot wake a powered-off computer or guarantee Dot's response time.

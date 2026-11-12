@@ -23,8 +23,20 @@ func run() throws {
               let reply = obj["reply"] as? String else { throw ProbeError() }
         return reply
     }
-    let fixtureDot:DotSender = { _,_,payload,_ in
+    let fixtureDot:DotSender = { service,id,payload,_ in
         let object = try JSONSerialization.jsonObject(with:payload) as? [String:Any]
+        if (object?["fixtureDot"] as? Bool == true || object?["kind"] as? String == "service.message"), fixture != 0 {
+            let body = try JSONSerialization.data(withJSONObject:["service":service,"id":id,"payload":object as Any])
+            let p = Process(), input = Pipe(), output = Pipe()
+            p.executableURL = URL(fileURLWithPath:"/usr/bin/curl")
+            p.arguments = ["-q","--noproxy","*","--silent","--fail","--max-time","7","-H","Content-Type: application/json","--data-binary","@-","http://127.0.0.1:\(fixture)/fixture-dot"]
+            p.standardInput = input; p.standardOutput = output; p.standardError = FileHandle.nullDevice
+            try p.run(); input.fileHandleForWriting.write(body); try input.fileHandleForWriting.close()
+            let data = output.fileHandleForReading.readDataToEndOfFile(); p.waitUntilExit()
+            guard p.terminationStatus == 0, let result = try JSONSerialization.jsonObject(with:data) as? [String:String],
+                  let state = result["state"], let reply = result["reply"] else { throw ProbeError() }
+            return (state,reply)
+        }
         guard object?["kind"] as? String == "service.reply",
               let source = object?["in_reply_to"] as? String,
               object?["text"] as? String != nil else { throw ProbeError() }
@@ -43,7 +55,10 @@ func run() throws {
             switch op {
             case "pair":
                 let sop=try object["sop"].map { try JSONDecoder().decode(OwnerSOP.self,from:JSONSerialization.data(withJSONObject:$0)) }
-                let p=try hub.pair(name:object["name"] as? String ?? "",destination:"demo",sop:sop)
+                let destination=object["destination"] as? String ?? "demo"
+                guard ["demo", "dot"].contains(destination) else { throw ProbeError() }
+                let p=try hub.pair(name:object["name"] as? String ?? "",destination:destination,
+                                   chromeOrigin:object["chromeOrigin"] as? String,sop:sop)
                 try emit(["id":p.id,"endpoint":p.endpoint,"secret":p.secret])
             case "set_sop":
                 let id=object["id"] as? String ?? ""
