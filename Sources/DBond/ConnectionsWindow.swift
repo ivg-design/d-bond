@@ -210,13 +210,13 @@ final class ConnectionsWindowController: NSObject, NSWindowDelegate {
         do {
             let traces = try hub.recentEventTraces(service: id, limit: 10)
             let body = traces.isEmpty ? "No events recorded for this connection yet." : traces.map { trace in
-                let stages = trace.stages.map { "  \($0.at)  \($0.state)  [\($0.basis)]" }.joined(separator: "\n")
+                let stages = trace.stages.map { "  \(displayTraceTime($0.at))  \($0.state)  [\($0.basis)]" }.joined(separator: "\n")
                 let version = trace.sopVersion.map { " · rules v\($0)" } ?? ""
                 return "\(trace.eventID)\(version)\n\(stages)"
             }.joined(separator: "\n\n")
             let alert = NSAlert()
             alert.messageText = "Recent events · \(service.name)"
-            alert.informativeText = "Local receipt stages, UTC milliseconds. broker_recorded is local state; native_observed is an observed native response. Neither alone proves a final reply."
+            alert.informativeText = "Receipt times use this Mac’s timezone. broker_recorded is local state; native_observed is an observed native response. Neither alone proves a final reply."
             alert.addButton(withTitle: "Done")
             alert.addButton(withTitle: "Copy trace")
             let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 560, height: 300))
@@ -445,7 +445,7 @@ private final class ConnectionRowView: NSView {
         let activity = service.subscribers == 0 ? "No open return stream" : "\(service.subscribers) return stream\(service.subscribers == 1 ? "" : "s")"
         let pending = service.queued + service.inFlight
         let queue = pending == 0 ? "" : " · \(pending) queued or dispatching"
-        let seen = service.lastSeen.map { " · last event \($0)" } ?? ""
+        let seen = service.lastSeen.map { " · last event \(displayTraceTime($0))" } ?? ""
         detail.stringValue = "\(destination) · \(activity)\(queue)\(seen)"
         sopButton.title = "Rules \(service.sop?.rules.count ?? 0)"
         setAccessibilityElement(true)

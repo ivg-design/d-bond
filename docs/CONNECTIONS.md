@@ -25,5 +25,5 @@ In **Connections**, choose **Rules** beside the service, add a rule, paste the i
 
 
 - A **queued** timestamp means the local Mac stored the event. **dot_stored** means the transport accepted it into storage.
-- **dot_acknowledged** and **dot_replied** are separate. The UTC times with milliseconds show when D-Bond observed those changes; they do not establish when a person saw a banner or a second app acted.
+- **dot_acknowledged** and **dot_replied** are separate. The displayed local times show when D-Bond observed those changes; they do not establish when a person saw a banner or a second app acted.
 - An empty stage is unknown, not zero elapsed time. Older events may have no timestamp history. Reconcile an uncertain send using the original event ID.

@@ -24,13 +24,15 @@ def main():
                               ("server/d-bond-launcher", launcher),
                               ("server/launch.sh", HERE / "server/launch.sh"),
                               ("server/mcp.py", HERE / "server/mcp.py"),
-                              ("server/dbond.py", ROOT / "adapters/cli/dbond.py")]:
+                              ("server/dbond.py", ROOT / "adapters/cli/dbond.py"),
+                              ("server/owner.py", ROOT / "adapters/cli/owner.py")]:
                 bundle.write(src, name)
     plugin_server = HERE / "plugin" / "server"
     plugin_server.mkdir(exist_ok=True)
     shutil.copy2(HERE / "server/mcp.py", plugin_server / "mcp.py")
     shutil.copy2(HERE / "server/launch.sh", plugin_server / "launch.sh")
     shutil.copy2(ROOT / "adapters/cli/dbond.py", plugin_server / "dbond.py")
+    shutil.copy2(ROOT / "adapters/cli/owner.py", plugin_server / "owner.py")
     print(OUTPUT)
 
 if __name__ == "__main__":

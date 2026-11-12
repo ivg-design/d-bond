@@ -16,6 +16,7 @@ product_dir="$(swift build -c release --show-bin-path)"
 cp "$product_dir/DBond" "$BIN_DIR/DBond"
 cp "$ROOT/scripts/native_link.py" "$RES_DIR/"
 install -m 755 "$ROOT/adapters/cli/dbond.py" "$RES_DIR/dbond"
+install -m 644 "$ROOT/adapters/cli/owner.py" "$RES_DIR/owner.py"
 cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

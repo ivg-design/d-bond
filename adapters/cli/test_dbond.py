@@ -112,6 +112,45 @@ class DBondCLITest(unittest.TestCase):
         with self.assertRaises(SystemExit):
             dbond._read_pairing("bad")
 
+    def test_trace_time_formats_fractional_and_legacy_iso_in_local_zone(self):
+        fractional = dbond._local_trace_time("2026-11-12T16:40:11.068+00:00")
+        legacy = dbond._local_trace_time("2026-11-12T16:40:11+00:00")
+        self.assertIn("2026", fractional)
+        self.assertIn("2026", legacy)
+        self.assertNotIn(".068", fractional)
+        self.assertNotEqual(fractional, "2026-11-12T16:40:11.068+00:00")
+
+    def test_trace_time_respects_daylight_saving_transition(self):
+        old_tz = os.environ.get("TZ")
+        try:
+            os.environ["TZ"] = "America/New_York"
+            time.tzset()
+            before = dbond._local_trace_time("2026-03-08T06:59:59Z")
+            after = dbond._local_trace_time("2026-03-08T07:00:00Z")
+            self.assertEqual(before, "Mar 8, 2026, 1:59:59 AM EST")
+            self.assertEqual(after, "Mar 8, 2026, 3:00:00 AM EDT")
+        finally:
+            if old_tz is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = old_tz
+            time.tzset()
+
+    def test_format_trace_keeps_raw_trace_unmodified(self):
+        raw = {"event": {"stages": [{"at": "2026-11-12T16:40:11.068+00:00", "state": "queued"}]}}
+        formatted = dbond._format_trace(raw)
+        self.assertNotIn(".068", formatted["event"]["stages"][0]["at"])
+        self.assertIn(".068", raw["event"]["stages"][0]["at"])
+
+    def test_trace_command_reads_owner_socket_and_prints_formatted_stages(self):
+        raw = {"events": [{"stages": [{"at": "2026-11-12T16:40:11.068+00:00"}]}]}
+        output = io.StringIO()
+        with patch.object(dbond, "_owner_request", return_value=raw) as request, contextlib.redirect_stdout(output):
+            dbond.command_trace(type("Args", (), {"connection_id": "11111111-2222-3333-4444-555555555555",
+                                                       "event_id": None, "limit": 1})())
+        request.assert_called_once_with({"op": "list_events", "id": "11111111-2222-3333-4444-555555555555", "limit": 1})
+        self.assertNotIn(".068", output.getvalue())
+
     def test_stale_listener_writes_merge_cursor_and_pushes_under_lock(self):
         self.link("http://127.0.0.1:18768/v1/services/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/events")
         one = dbond._read_pairing("test")

@@ -35,6 +35,9 @@ def main():
         p,_=start()
         paired=cmd(p,{'op':'pair','name':'Policy fixture','sop':sop})
         service,secret,url=paired['id'],paired['secret'],paired['endpoint']
+        assert owner(directory,{'op':'pair','name':'bad origin','chromeOrigin':'*'}).get('error')
+        origin='chrome-extension://'+'a'*32
+        assert owner(directory,{'op':'pair','name':'extension control','chromeOrigin':origin})['chromeOrigin']==origin
         assert owner(directory,{'op':'list'})['services'][0]['sopVersion']==1
         assert owner(directory,{'op':'get_sop','id':service})['sop']==sop
         assert owner(directory,{'op':'get_sop','id':'unknown'}).get('error')

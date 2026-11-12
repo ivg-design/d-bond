@@ -47,8 +47,9 @@ public final class OwnerSocket {
                     func output(_ value:[String:Any]) throws -> Data { try JSONSerialization.data(withJSONObject:value,options:[.sortedKeys]) }
                     switch op {
                     case "pair":
-                        guard let name=obj["name"] as? String, Set(obj.keys).isSubset(of:["op","name","sop"]) else {throw Fault.message("Invalid pairing request.")}
-                        reply=try JSONEncoder().encode(hub.pair(name:name,destination:"dot",sop:try sop(obj["sop"])))
+                        guard let name=obj["name"] as? String, Set(obj.keys).isSubset(of:["op","name","sop","chromeOrigin"]),
+                              obj["chromeOrigin"] == nil || obj["chromeOrigin"] is String else {throw Fault.message("Invalid pairing request.")}
+                        reply=try JSONEncoder().encode(hub.pair(name:name,destination:"dot",chromeOrigin:obj["chromeOrigin"] as? String,sop:try sop(obj["sop"])))
                     case "rename":
                         guard Set(obj.keys)==["op","id","name"],let id=obj["id"] as? String,let name=obj["name"] as? String else {throw Fault.message("Invalid rename request.")}
                         try hub.rename(id:id,name:name);reply=Data(#"{"renamed":true}"#.utf8)

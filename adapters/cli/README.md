@@ -114,3 +114,6 @@ Run the focused protocol fixture without contacting D-Bond or Dot:
 ```sh
 python3 -m unittest adapters.cli.test_dbond -v
 ```
+# Local event traces
+
+Use `dbond trace <connection-uuid> [event-id]` to read recent traces from the running Mac app. Add `--limit 1` to inspect only the newest event. Displayed times use the Mac’s current timezone and omit fractions of a second; the stored ledger and owner-socket protocol keep precise UTC timestamps. Existing whole-second timestamps are supported.

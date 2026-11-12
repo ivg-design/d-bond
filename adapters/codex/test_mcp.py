@@ -49,6 +49,14 @@ class OwnerSocketTest(unittest.TestCase):
 
 
 class MCPTest(unittest.TestCase):
+    def test_trace_output_is_local_and_omits_subseconds_without_mutating_input(self):
+        raw = {"events": [{"stages": [{"at": "2026-11-12T16:40:11.068+00:00"},
+                                        {"at": "2026-11-12T16:40:11+00:00"}]}]}
+        formatted = mcp.format_trace(raw)
+        self.assertNotIn(".068", formatted["events"][0]["stages"][0]["at"])
+        self.assertIn("2026", formatted["events"][0]["stages"][1]["at"])
+        self.assertIn(".068", raw["events"][0]["stages"][0]["at"])
+
     def test_routes_and_version_check(self):
         original = mcp.owner.request
         seen = []

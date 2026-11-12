@@ -15,6 +15,7 @@ import sys
 import tempfile
 import threading
 import time
+from datetime import datetime
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -28,6 +29,36 @@ EVENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@-]{0,119}$")
 SESSION_ID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 MAX_PAIRING = 64 * 1024
 MAX_FRAME = 512 * 1024
+
+
+def _local_trace_time(raw: str) -> str:
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.astimezone()
+        return parsed.astimezone().strftime("%b %-d, %Y, %-I:%M:%S %p %Z")
+    except (TypeError, ValueError, OverflowError):
+        return raw
+
+
+def _format_trace(value: dict) -> dict:
+    result = dict(value)
+    if isinstance(result.get("events"), list):
+        result["events"] = [_format_trace(event) for event in result["events"]]
+    if isinstance(result.get("event"), dict):
+        result["event"] = _format_trace(result["event"])
+    if isinstance(result.get("stages"), list):
+        result["stages"] = [dict(stage, at=_local_trace_time(stage["at"]))
+                             if isinstance(stage, dict) and isinstance(stage.get("at"), str) else stage
+                             for stage in result["stages"]]
+    return result
+
+
+def _owner_request(payload: dict) -> dict:
+    # Keep the long-standing one-file CLI commands usable when invoked from an
+    # older standalone copy; trace support loads its same-user socket helper lazily.
+    from owner import request
+    return request(payload)
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -127,8 +158,13 @@ def validate_pairing(data: dict) -> dict:
             or not re.fullmatch(r"/v1/services/[0-9a-fA-F-]{36}/events", url.path)
             or not isinstance(secret, str) or not re.fullmatch(r"[A-Za-z0-9+/]+={0,2}", secret)):
         fail("Use the loopback service endpoint and one-time credential from D-Bond.")
-    return {"endpoint": urllib.parse.urlunsplit(url), "secret": secret,
-            "cursor": 0, "pushes": []}
+    pairing = {"endpoint": urllib.parse.urlunsplit(url), "secret": secret, "cursor": 0, "pushes": []}
+    origin = data.get("chromeOrigin")
+    if origin is not None:
+        if not isinstance(origin, str) or not re.fullmatch(r"chrome-extension://[a-p]{32}", origin):
+            fail("Invalid Chrome extension origin in pairing.")
+        pairing["chromeOrigin"] = origin
+    return pairing
 
 
 def _load_source(path: str | None) -> dict:
@@ -300,7 +336,13 @@ def command_enroll(args) -> None:
         try:
             client.connect(str(OWNER_SOCKET))
             name = enrollment_name(args)
-            request = json.dumps({"op": "pair", "name": name}, separators=(",", ":")).encode() + b"\n"
+            frame = {"op": "pair", "name": name}
+            chrome_id = getattr(args, "chrome_id", None)
+            if chrome_id is not None:
+                if not re.fullmatch(r"[a-p]{32}", chrome_id):
+                    fail("Expected an exact 32-letter Chrome extension ID (a through p).")
+                frame["chromeOrigin"] = "chrome-extension://" + chrome_id
+            request = json.dumps(frame, separators=(",", ":")).encode() + b"\n"
             client.sendall(request)
             data = bytearray()
             while len(data) <= MAX_PAIRING and not data.endswith(b"\n"):
@@ -445,6 +487,16 @@ def _peers(pairing: dict) -> list[dict]:
     if status != 200 or not isinstance(services, list):
         fail("Could not read the D-Bond connection list.")
     return services
+
+
+def command_trace(args) -> None:
+    if not SESSION_ID_RE.fullmatch(args.connection_id):
+        fail("Use the exact connection UUID shown by `dbond peers` or the D-Bond app.")
+    try:
+        value = _owner_request({"op": "trace", "id": args.connection_id, "eventID": args.event_id}) if args.event_id else _owner_request({"op": "list_events", "id": args.connection_id, "limit": args.limit})
+    except (OSError, ValueError) as exc:
+        fail(f"Could not read the local event trace: {exc}")
+    print(json.dumps(_format_trace(value), ensure_ascii=False))
 
 
 def command_ask(args) -> None:
@@ -596,6 +648,7 @@ def parser() -> argparse.ArgumentParser:
     enroll = sub.add_parser("enroll", help="create a new Dot service pairing through the running D-Bond app")
     enroll.add_argument("alias")
     enroll.add_argument("--name", help="display name shown in the D-Bond menu")
+    enroll.add_argument("--chrome-id", help="allow only this Chrome extension origin to use this pairing in a browser")
     enroll.add_argument("--service", help="application or service, such as Vollna")
     enroll.add_argument("--topic", help="chat title or workflow, such as Job intake")
     enroll.add_argument("--client", choices=("claude", "codex"), help="local client identity for the session")
@@ -611,6 +664,11 @@ def parser() -> argparse.ArgumentParser:
     peers = sub.add_parser("peers", help="list connections by their D-Bond names and IDs")
     peers.add_argument("alias", help="your own paired alias")
     peers.set_defaults(run=lambda args: print(json.dumps(_peers(_read_pairing(args.alias)), ensure_ascii=False)))
+    trace = sub.add_parser("trace", help="show recent local event traces in this Mac's timezone")
+    trace.add_argument("connection_id", help="exact connection UUID")
+    trace.add_argument("event_id", nargs="?", help="optional exact event ID")
+    trace.add_argument("--limit", type=int, choices=range(1, 101), default=20)
+    trace.set_defaults(run=command_trace)
     listen = sub.add_parser("listen", help="receive addressed Dot pushes via SSE")
     listen.add_argument("alias"); listen.add_argument("--push-only",action="store_true",help="Print only addressed pushes (for Claude Monitor)"); listen.set_defaults(run=command_listen)
     answer = sub.add_parser("answer", help="send a reply to a push previously recorded by listen")

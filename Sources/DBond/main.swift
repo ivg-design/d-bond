@@ -2,6 +2,7 @@ import AppKit
 import DBondCore
 import Foundation
 import ServiceManagement
+import Darwin
 
 @MainActor
 final class MenuController: NSObject, NSApplicationDelegate {
@@ -71,7 +72,7 @@ final class MenuController: NSObject, NSApplicationDelegate {
                 let mode=["dot":"Dot","herald":"Herald notifications","demo":"Local echo"][service.destination] ?? service.destination
                 details.addItem(disabled("Destination: "+mode))
                 details.addItem(disabled(service.subscribers == 0 ? "No open return stream" : "\(service.subscribers) open return stream(s)"))
-                if let seen=service.lastSeen { details.addItem(disabled("Last incoming event: "+seen)) }
+                if let seen=service.lastSeen { details.addItem(disabled("Last incoming event: "+displayTraceTime(seen))) }
                 if let last=service.lastState { details.addItem(disabled(String(friendlyState(last,herald:service.herald).dropFirst(3)))) }
                 if service.queued+service.inFlight>0 {details.addItem(disabled("\(service.queued) queued · \(service.inFlight) dispatching"))}
                 if let origin=service.chromeOrigin {details.addItem(disabled(origin))}
@@ -105,6 +106,8 @@ final class MenuController: NSObject, NSApplicationDelegate {
         }
         connectionsWindow?.showWindow()
     }
+
+
     func applicationShouldHandleReopen(_ sender:NSApplication,hasVisibleWindows flag:Bool)->Bool {
         showConnections(); return true
     }
