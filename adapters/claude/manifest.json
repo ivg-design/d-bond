@@ -1,0 +1,19 @@
+{
+  "manifest_version": "0.3",
+  "name": "d-bond",
+  "display_name": "D-Bond",
+  "version": "0.1.2",
+  "description": "Pair a Claude Desktop chat with the local D-Bond service and exchange addressed messages through Dot.",
+  "author": {"name": "IVG"},
+  "server": {
+    "type": "binary",
+    "entry_point": "server/d-bond-launcher",
+    "mcp_config": {
+      "command": "/bin/sh",
+      "args": ["${__dirname}/server/launch.sh"]
+    }
+  },
+  "compatibility": {
+    "platforms": ["darwin"]
+  }
+}

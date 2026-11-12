@@ -1,0 +1,18 @@
+{
+  "name": "d-bond",
+  "version": "0.1.0",
+  "description": "Receive addressed D-Bond messages in an open Claude Code session and reply through Dot",
+  "author": {"name": "IVG"},
+  "channels": [{
+    "server": "d-bond",
+    "displayName": "D-Bond",
+    "userConfig": {
+      "alias": {
+        "type": "string",
+        "title": "Pairing alias",
+        "description": "The existing D-Bond CLI alias for this Claude Code session, such as claude-design-review",
+        "required": true
+      }
+    }
+  }]
+}

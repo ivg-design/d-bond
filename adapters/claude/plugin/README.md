@@ -1,0 +1,3 @@
+# D-Bond Claude Code channel
+
+This local plugin connects one running Claude Code session to a durable D-Bond pairing. Configure its Pairing alias with a unique alias for this session, then use its `enroll` tool to name the real service/topic. Addressed Dot pushes enter the open session as channel events and include a stable source ID. Use `answer` with that ID to return a correlated response. The plugin also provides `peers` and `ask` tools for outgoing conversations. It does not relay Claude permission prompts, and a closed session cannot receive channel events. See the parent README for build and startup instructions.

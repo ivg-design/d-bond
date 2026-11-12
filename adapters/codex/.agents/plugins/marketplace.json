@@ -1,0 +1,10 @@
+{
+  "name": "d-bond-local",
+  "interface": {"displayName": "D-Bond Local"},
+  "plugins": [{
+    "name": "d-bond-local-control",
+    "source": {"source": "local", "path": "./plugins/d-bond-local-control"},
+    "policy": {"installation": "AVAILABLE", "authentication": "ON_INSTALL"},
+    "category": "Productivity"
+  }]
+}

@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "d-bond-local-control": {
+      "command": "/bin/sh",
+      "args": ["${__dirname}/server/launch.sh"]
+    }
+  }
+}

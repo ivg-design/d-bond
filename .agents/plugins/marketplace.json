@@ -1,0 +1,10 @@
+{
+  "name": "dbond-github",
+  "interface": {"displayName": "D-Bond"},
+  "plugins": [{
+    "name": "d-bond-local-control",
+    "source": {"source": "local", "path": "./adapters/codex/plugins/d-bond-local-control"},
+    "policy": {"installation": "AVAILABLE", "authentication": "ON_INSTALL"},
+    "category": "Productivity"
+  }]
+}

@@ -1,0 +1,15 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "d-bond-local-control",
+  "version": "0.1.0",
+  "description": "Configure D-Bond connection SOPs and inspect event traces through the owner-only local socket.",
+  "author": {"name": "IVG"},
+  "extensions": {"com.openai": {"interface": {
+    "displayName": "D-Bond Local Control",
+    "shortDescription": "Configure D-Bond locally",
+    "longDescription": "Inspect local connections, configure ordered per-connection SOP rules with version checks, and trace event states through D-Bond's same-user Unix socket. Separate from D-Bond for Dot messaging.",
+    "developerName": "IVG", "category": "Productivity",
+    "capabilities": ["Interactive"],
+    "defaultPrompt": "Show my D-Bond connections and help configure a connection's SOP."
+  }}}
+}
