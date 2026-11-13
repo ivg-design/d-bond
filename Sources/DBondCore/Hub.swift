@@ -7,11 +7,19 @@ public struct OwnerSOP: Codable, Equatable { public var version:Int; public var 
 public struct TraceStage: Codable, Equatable { public var state,at,basis:String }
 public struct EventTrace: Codable { public var service,eventID,state:String; public var sopVersion:Int?; public var stages:[TraceStage] }
 public struct Pairing: Codable { public let id,secret,endpoint,destination: String; public let herald:Bool; public let chromeOrigin:String? }
-public struct ServiceView { public let id,name,endpoint,destination: String; public let lastSeen,lastState,chromeOrigin: String?; public let herald,paused:Bool; public let queued,inFlight,subscribers:Int; public let sop:OwnerSOP? }
+public struct ServiceView { public let id,name,endpoint,destination: String; public let lastSeen,lastState,chromeOrigin: String?; public let herald,paused:Bool; public let queued,inFlight,subscribers,directSubscribers:Int; public let sop:OwnerSOP? }
 public struct Snapshot { public let endpoint: String; public let services:[ServiceView]; public let eventCount:Int }
 struct Service: Codable, Equatable { var id,name,digest:String; var seen,state:String?; var herald,paused:Bool?; var destination,chromeOrigin:String?; var sop:OwnerSOP? = nil }
 struct Event: Codable, Equatable { var service,id:String; var payload:Data; var state:String; var sequence:Int?; var reply:String?; var sourceID:String? = nil; var payloadDigest:String? = nil; var retrying:Bool? = nil; var route:String? = nil; var sop:OwnerSOP? = nil; var stages:[TraceStage]? = nil }
-struct Receipt: Codable, Equatable { var service,id:String; var sequence:Int; var state,reply:String }
+struct Receipt: Codable, Equatable {
+    var service,id:String; var sequence:Int; var state,reply:String
+    var recordedAt:String? = nil
+    var wire:[String:Any] {
+        var result:[String:Any] = ["id":id,"sequence":sequence,"state":state,"reply":reply]
+        if let recordedAt { result["recorded_at"] = recordedAt }
+        return result
+    }
+}
 struct Ledger: Codable { var services:[Service] = []; var events:[Event] = []; var receipts:[Receipt]?; var seq = 0 }
 public typealias Handler = (String,String,Data) throws -> String
 public typealias DotSender = (String,String,Data,@escaping (String,String)->Void) throws -> (state:String,reply:String)
@@ -25,6 +33,7 @@ public final class Hub: @unchecked Sendable {
     private var ledger:Ledger
     private var nativeWorker:Process?
     private var subscribers:[String:Int] = [:]
+    private var directSubscribers:[String:Int] = [:]
     public convenience init() throws {
         let base = FileManager.default.urls(for:.applicationSupportDirectory,in:.userDomainMask)[0]
         try self.init(directory:base.appendingPathComponent("D-Bond Proof of Concept"),port:18768)
@@ -126,18 +135,55 @@ public final class Hub: @unchecked Sendable {
     private func receiptRows(service:String, after:Int) -> [Receipt] {
         let history = (ledger.receipts ?? []).filter { $0.service == service }
         let recordedIDs = Set(history.map { $0.id })
-        let legacy = ledger.events.filter { $0.service == service && !recordedIDs.contains($0.id) && ($0.sequence ?? 0) > after }
+        let legacy = ledger.events.filter { $0.service == service && !($0.route ?? "").hasPrefix("peer:") && !recordedIDs.contains($0.id) && ($0.sequence ?? 0) > after }
             .map { Receipt(service:$0.service,id:$0.id,sequence:$0.sequence!,state:$0.state,reply:$0.reply ?? "") }
-        return (legacy + history.filter { $0.sequence > after }).sorted { $0.sequence < $1.sequence }
+        // Version 0.2 receipts have no timestamp field, but the event trace
+        // contains the original observation. Never timestamp a replay with "now".
+        var eventsByID: [String:Event] = [:]
+        return (legacy + history.filter { $0.sequence > after }).sorted { $0.sequence < $1.sequence }.prefix(32).map { row in
+            guard row.recordedAt == nil else { return row }
+            if eventsByID.isEmpty {
+                eventsByID = Dictionary(uniqueKeysWithValues: ledger.events.filter { $0.service == service }.map { ($0.id,$0) })
+            }
+            var dated = row
+            dated.recordedAt = eventsByID[row.id]?.stages?.first(where: { $0.state == row.state })?.at
+            return dated
+        }
     }
     public func snapshot() -> Snapshot {
         lock.lock(); defer { lock.unlock() }
         return Snapshot(endpoint:base,services:ledger.services.map { service in
             let events = ledger.events.filter { $0.service == service.id }
-            return ServiceView(id:service.id,name:service.name,endpoint:endpoint(service.id),destination:service.destination ?? (service.herald == true ? "herald" : "demo"),lastSeen:service.seen,lastState:service.state,chromeOrigin:service.chromeOrigin,herald:service.herald == true,paused:service.paused == true,queued:events.filter { $0.state == "queued" }.count,inFlight:events.filter { ["dispatching","sending_banner"].contains($0.state) }.count,subscribers:subscribers[service.id] ?? 0,sop:service.sop)
+            return ServiceView(id:service.id,name:service.name,endpoint:endpoint(service.id),destination:service.destination ?? (service.herald == true ? "herald" : "demo"),lastSeen:service.seen,lastState:service.state,chromeOrigin:service.chromeOrigin,herald:service.herald == true,paused:service.paused == true,queued:events.filter { $0.state == "queued" }.count,inFlight:events.filter { ["dispatching","sending_banner"].contains($0.state) }.count,subscribers:subscribers[service.id] ?? 0,directSubscribers:directSubscribers[service.id] ?? 0,sop:service.sop)
         },eventCount:ledger.events.count)
     }
     public func dotLinkStatus() -> String { nativeStatus() }
+    /// Explicit owner-local note to one already paired, actively listening agent.
+    /// This creates no pairing and offers no impersonation of another service.
+    public func sendOwnerDirectNote(to recipientID:String, id messageID:String, text:String) throws -> Int {
+        guard !messageID.isEmpty, messageID.utf8.count <= 120, !messageID.hasPrefix("@dot:"),
+              !messageID.unicodeScalars.contains(where:CharacterSet.controlCharacters.contains),
+              !text.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty, text.utf8.count <= 65536 else {
+            throw Fault.message("Invalid owner direct note.")
+        }
+        lock.lock(); defer { lock.unlock() }
+        guard ledger.services.contains(where: { $0.id == recipientID && $0.paused != true && ["dot","peer"].contains($0.destination ?? "") }),
+              (directSubscribers[recipientID] ?? 0) > 0 else {
+            throw Fault.message("Target agent has no active direct listener.")
+        }
+        let payload = try JSONSerialization.data(withJSONObject:["text":text,"in_reply_to":NSNull()],options:[.sortedKeys])
+        if let old = ledger.events.first(where: { $0.service == "owner" && $0.id == messageID }) {
+            guard old.route == "peer:" + recipientID && old.payloadDigest == Self.digest(payload) else { throw Fault.message("Owner note ID conflicts with existing content.") }
+            return old.sequence ?? 0
+        }
+        var next=ledger; next.seq += 1
+        var event=Event(service:"owner",id:messageID,payload:payload,state:"peer_delivered",sequence:next.seq,
+                        payloadDigest:Self.digest(payload),route:"peer:" + recipientID)
+        event=Self.marked(event,"peer_delivered")
+        next.events.append(event)
+        try persist(next); lock.broadcast()
+        return next.seq
+    }
     /// Test harness only: available only on an isolated Hub with a fixture Herald directory.
     public func injectNativePushForFixture(service:String, sourceID:String, text:String) throws {
         guard heraldSupport != nil else { throw Fault.message("Native push injection requires a Herald fixture.") }
@@ -148,7 +194,7 @@ public final class Hub: @unchecked Sendable {
         let name = name.trimmingCharacters(in:.whitespacesAndNewlines)
         guard !name.isEmpty, name.count <= 200, !name.unicodeScalars.contains(where:CharacterSet.controlCharacters.contains) else { throw Fault.message("Enter a name between 1 and 200 printable characters.") }
         let mode = herald ? "herald" : destination
-        guard ["dot","demo","herald"].contains(mode) else { throw Fault.message("Unknown destination.") }
+        guard ["dot","demo","herald","peer"].contains(mode) else { throw Fault.message("Unknown destination.") }
         if let chromeOrigin {
             let prefix = "chrome-extension://"
             let suffix = chromeOrigin.dropFirst(prefix.count)
@@ -222,7 +268,7 @@ public final class Hub: @unchecked Sendable {
     public func remove(id:String) throws {
         lock.lock(); defer { lock.unlock() }
         guard ledger.services.contains(where: { $0.id == id }) else { throw Fault.message("Service connection no longer exists.") }
-        var next = ledger; next.services.removeAll { $0.id == id }; next.events.removeAll { $0.service == id }; next.receipts?.removeAll { $0.service == id }
+        var next = ledger; next.services.removeAll { $0.id == id }; next.events.removeAll { $0.service == id || $0.route == "peer:" + id }; next.receipts?.removeAll { $0.service == id }
         try persist(next); lock.broadcast()
     }
     /// An explicit retry keeps the original immutable service/event key and payload.
@@ -243,7 +289,7 @@ public final class Hub: @unchecked Sendable {
     private func route(_ r:Request) -> HTTPReply {
         guard let url = URLComponents(string:r.target) else { return HTTPReply(400,[:]) }
         let p = url.path.split(separator:"/").map(String.init)
-        guard [4,5].contains(p.count), p[0] == "v1", p[1] == "services", (p[3] == "events" || (p.count == 4 && p[3] == "peers")) else { return HTTPReply(404,[:]) }
+        guard [4,5].contains(p.count), p[0] == "v1", p[1] == "services", (p[3] == "events" || p[3] == "messages" || (p.count == 4 && p[3] == "peers")) else { return HTTPReply(404,[:]) }
         let id = p[2]
         if let origin = r.headers["origin"] {
             lock.lock()
@@ -256,6 +302,7 @@ public final class Hub: @unchecked Sendable {
         let digest = Self.digest(Data(auth.dropFirst(7).utf8))
         lock.lock(); defer { lock.unlock() }
         guard let ix = ledger.services.firstIndex(where:{ $0.id == id && $0.digest == digest }) else { return HTTPReply(401,[:]) }
+        if p[3] == "messages" { return directRoute(r, url:url, parts:p, senderIndex:ix) }
         if p[3] == "peers" {
             guard r.method == "GET", url.query == nil else { return HTTPReply(405, [:]) }
             guard ledger.services[ix].paused != true else { return HTTPReply(423, ["error":"Service connection is paused."]) }
@@ -273,18 +320,20 @@ public final class Hub: @unchecked Sendable {
             while true {
                 guard ledger.services.contains(where:{$0.id == id}) else { return HTTPReply(401,[:]) }
                 let rows = receiptRows(service:id,after:after).prefix(32)
-                if !rows.isEmpty { return HTTPReply(200,["messages":rows.map { ["id":$0.id,"sequence":$0.sequence,"state":$0.state,"reply":$0.reply] as [String:Any] }]) }
+                if !rows.isEmpty { return HTTPReply(200,["messages":rows.map { $0.wire }]) }
                 if !lock.wait(until:until) { return HTTPReply(200,["messages":[]]) }
             }
         }
         guard r.method == "POST", p.count == 4, url.query == nil else { return HTTPReply(405,[:]) }
+        guard ledger.services[ix].destination != "peer" else { return HTTPReply(422,["error":"Peer connections use /messages."]) }
         guard r.headers["content-type"]?.components(separatedBy:";").first?.lowercased() == "application/json",
               let body = (try? JSONSerialization.jsonObject(with:r.body)) as? [String:Any], Set(body.keys) == ["id","payload"],
               let eventID = body["id"] as? String, !eventID.isEmpty, !eventID.hasPrefix("@dot:"), eventID.utf8.count <= 120,
               !eventID.unicodeScalars.contains(where:CharacterSet.controlCharacters.contains), let payload = body["payload"],
               let data = try? JSONSerialization.data(withJSONObject:payload,options:[.sortedKeys,.fragmentsAllowed]) else { return HTTPReply(422,["error":"Expected {id, payload}."]) }
         if let old = ledger.events.first(where:{$0.service == id && $0.id == eventID}) {
-            guard (old.payloadDigest ?? Self.digest(old.payload)) == Self.digest(data) else { return HTTPReply(409,["error":"Same ID with different payload."]) }
+            guard !(old.route ?? "").hasPrefix("peer:"),
+                  (old.payloadDigest ?? Self.digest(old.payload)) == Self.digest(data) else { return HTTPReply(409,["error":"Same ID with different payload or route."]) }
             return HTTPReply(200,["id":eventID,"state":old.state,"duplicate":true])
         }
         guard ledger.services[ix].paused != true else { return HTTPReply(423,["error":"Service connection is paused; no new event was queued."]) }
@@ -296,6 +345,109 @@ public final class Hub: @unchecked Sendable {
         do { try persist(next) } catch { return HTTPReply(507,["error":"Could not persist receipt."]) }
         schedule(event)
         return HTTPReply(202,["id":eventID,"state":"queued","duplicate":false])
+    }
+    /// Direct agent exchange is a separate namespace from Dot-bound events.
+    /// Caller holds the Hub lock. Messages remain in the WAL ledger for offline replay.
+    private func directRoute(_ r:Request, url:URLComponents, parts:[String], senderIndex:Int) -> HTTPReply {
+        let sender = ledger.services[senderIndex]
+        guard ["dot","peer"].contains(sender.destination ?? "") else { return HTTPReply(403,["error":"This connection cannot send direct messages."]) }
+        guard sender.paused != true else { return HTTPReply(423,["error":"Service connection is paused."]) }
+        if parts.count == 5 && parts[4] == "peers" {
+            guard r.method == "GET", url.query == nil else { return HTTPReply(405,[:]) }
+            let rows = ledger.services.filter { ["dot","peer"].contains($0.destination ?? "") && $0.id != sender.id }
+            return HTTPReply(200,["services":rows.map { ["id":$0.id,"name":$0.name,"paused":$0.paused == true] as [String:Any] }])
+        }
+        let streaming = parts.count == 5 && parts[4] == "stream"
+        guard parts.count == 4 || streaming else { return HTTPReply(404,[:]) }
+        if r.method == "GET" {
+            let query = url.queryItems ?? []
+            guard query.count <= 1, query.allSatisfy({ $0.name == "after" && $0.value != nil }),
+                  let after = Int(query.first?.value ?? "0"), after >= 0 else { return HTTPReply(400,[:]) }
+            if streaming {
+                guard r.headers["accept"]?.contains("text/event-stream") == true else { return HTTPReply(406,[:]) }
+                return HTTPReply(200, stream: { [weak self] write in self?.directStream(service:sender.id,after:after,write:write) })
+            }
+            func rows() -> [[String:Any]] {
+                ledger.events.filter { $0.route == "peer:" + sender.id && ($0.sequence ?? 0) > after }
+                    .sorted { ($0.sequence ?? 0) < ($1.sequence ?? 0) }.prefix(64).compactMap { event in
+                        guard let body = try? JSONSerialization.jsonObject(with:event.payload) as? [String:Any] else { return nil }
+                        return ["id":event.id,"from":event.service,"to":sender.id,"text":body["text"] ?? "",
+                                "in_reply_to":body["in_reply_to"] ?? NSNull(),"sequence":event.sequence ?? 0]
+                    }
+            }
+            let until = Date().addingTimeInterval(12)
+            while true {
+                guard ledger.services.contains(where: { $0.id == sender.id && $0.paused != true }) else { return HTTPReply(423,[:]) }
+                let messages = rows()
+                if !messages.isEmpty { return HTTPReply(200,["messages":messages]) }
+                if !lock.wait(until:until) { return HTTPReply(200,["messages":[]]) }
+            }
+        }
+        guard !streaming, r.method == "POST", url.query == nil,
+              r.headers["content-type"]?.components(separatedBy:";").first?.lowercased() == "application/json",
+              let body = (try? JSONSerialization.jsonObject(with:r.body)) as? [String:Any],
+              Set(body.keys).isSubset(of:["id","to","text","in_reply_to"]),
+              let messageID = body["id"] as? String, !messageID.isEmpty, messageID.utf8.count <= 120,
+              !messageID.hasPrefix("@dot:"), !messageID.unicodeScalars.contains(where:CharacterSet.controlCharacters.contains),
+              let target = body["to"] as? String, let text = body["text"] as? String,
+              !text.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty, text.utf8.count <= 65536,
+              body["in_reply_to"] == nil || body["in_reply_to"] is String else { return HTTPReply(422,["error":"Expected {id,to,text,in_reply_to?}."]) }
+        guard let recipient = ledger.services.first(where: { $0.id == target && ["dot","peer"].contains($0.destination ?? "") }) else { return HTTPReply(404,["error":"Direct recipient is unavailable."]) }
+        guard recipient.paused != true else { return HTTPReply(423,["error":"Direct recipient is paused."]) }
+        if let replyID = body["in_reply_to"] as? String {
+            guard ledger.events.contains(where: { $0.id == replyID && $0.service == target && $0.route == "peer:" + sender.id }) else {
+                return HTTPReply(422,["error":"Reply does not belong to these two connections."])
+            }
+        }
+        let payload = (try? JSONSerialization.data(withJSONObject:["text":text,"in_reply_to":body["in_reply_to"] ?? NSNull()],options:[.sortedKeys])) ?? Data()
+        guard !payload.isEmpty else { return HTTPReply(422,[:]) }
+        if let old = ledger.events.first(where: { $0.service == sender.id && $0.id == messageID }) {
+            guard old.route == "peer:" + target && (old.payloadDigest ?? Self.digest(old.payload)) == Self.digest(payload) else {
+                return HTTPReply(409,["error":"Same ID with different direct message."])
+            }
+            return HTTPReply(200,["id":messageID,"sequence":old.sequence ?? 0,"duplicate":true])
+        }
+        var next = ledger
+        next.seq += 1
+        var event = Event(service:sender.id,id:messageID,payload:payload,state:"peer_delivered",sequence:next.seq,
+                          payloadDigest:Self.digest(payload),route:"peer:" + target)
+        event = Self.marked(event,"peer_delivered",basis:"broker_recorded")
+        next.events.append(event)
+        next.services[senderIndex].seen = Self.now()
+        next.services[senderIndex].state = "peer_delivered"
+        do { try persist(next); lock.broadcast() } catch { return HTTPReply(507,["error":"Could not persist direct message."]) }
+        return HTTPReply(202,["id":messageID,"sequence":next.seq,"duplicate":false])
+    }
+    private func directStream(service:String, after:Int, write:(Data)->Bool) {
+        lock.lock(); directSubscribers[service,default:0] += 1; lock.unlock()
+        defer { lock.lock(); directSubscribers[service,default:1] -= 1; if directSubscribers[service] == 0 { directSubscribers.removeValue(forKey:service) }; lock.unlock() }
+        var cursor = after
+        while true {
+            lock.lock()
+            guard ledger.services.contains(where: { $0.id == service && $0.paused != true && ["dot","peer"].contains($0.destination ?? "") }) else { lock.unlock(); return }
+            let rows = Array(ledger.events.filter { $0.route == "peer:" + service && ($0.sequence ?? 0) > cursor }
+                .sorted { ($0.sequence ?? 0) < ($1.sequence ?? 0) }.prefix(64))
+            if rows.isEmpty {
+                let changed = lock.wait(until:Date().addingTimeInterval(18))
+                lock.unlock()
+                if !changed && !write(Data(": heartbeat\n\n".utf8)) { return }
+                continue
+            }
+            lock.unlock()
+            for row in rows {
+                lock.lock()
+                let active = ledger.services.contains(where: { $0.id == service && $0.paused != true })
+                lock.unlock()
+                guard active, let body = try? JSONSerialization.jsonObject(with:row.payload) as? [String:Any] else { return }
+                let value:[String:Any] = ["id":row.id,"from":row.service,"to":service,"text":body["text"] ?? "",
+                                          "in_reply_to":body["in_reply_to"] ?? NSNull(),"sequence":row.sequence ?? 0]
+                guard let json = try? JSONSerialization.data(withJSONObject:value) else { return }
+                var frame=Data("id: \(row.sequence ?? 0)\ndata: ".utf8)
+                frame.append(json);frame.append(Data("\n\n".utf8))
+                guard write(frame) else { return }
+                cursor=row.sequence ?? cursor
+            }
+        }
     }
     private func stream(service:String, after:Int, write:(Data)->Bool) {
         lock.lock(); subscribers[service,default:0] += 1; lock.unlock()
@@ -317,7 +469,7 @@ public final class Hub: @unchecked Sendable {
                 let active = ledger.services.contains(where: { $0.id == service && $0.paused != true })
                 lock.unlock()
                 guard active else { return }
-                let value:[String:Any] = ["id":row.id,"sequence":row.sequence,"state":row.state,"reply":row.reply]
+                let value = row.wire
                 guard let json = try? JSONSerialization.data(withJSONObject:value) else { return }
                 var frame = Data("id: \(row.sequence)\ndata: ".utf8)
                 frame.append(json); frame.append(Data("\n\n".utf8))
@@ -405,7 +557,7 @@ public final class Hub: @unchecked Sendable {
             return true
         }
         var next = ledger; next.seq += 1
-        next.receipts = (next.receipts ?? []) + [Receipt(service:service,id:id,sequence:next.seq,state:state,reply:reply)]
+        next.receipts = (next.receipts ?? []) + [Receipt(service:service,id:id,sequence:next.seq,state:state,reply:reply,recordedAt:Self.now())]
         next.events[ix] = Self.marked(next.events[ix],state,basis:state.hasPrefix("dot_") && !["dot_unconfirmed","dot_route_blocked","dot_waiting_for_link","dot_stored","dot_quarantined"].contains(state) ? "native_observed" : "broker_recorded"); next.events[ix].sequence = next.seq; next.events[ix].reply = nil; next.events[ix].retrying = false
         if ["dot_replied","dot_cancelled","dot_expired","dot_quarantined"].contains(state) {
             if next.events[ix].payloadDigest == nil { next.events[ix].payloadDigest = Self.digest(next.events[ix].payload) }
@@ -440,7 +592,7 @@ public final class Hub: @unchecked Sendable {
               let sx = ledger.services.firstIndex(where: { $0.id == service && $0.destination == "dot" && $0.paused != true }) else { return }
         let detail = String(data:ledger.events[ix].payload,encoding:.utf8) ?? ""
         var next = ledger; next.seq += 1
-        next.receipts = (next.receipts ?? []) + [Receipt(service:service,id:id,sequence:next.seq,state:"dot_push",reply:detail)]
+        next.receipts = (next.receipts ?? []) + [Receipt(service:service,id:id,sequence:next.seq,state:"dot_push",reply:detail,recordedAt:Self.now())]
         next.events[ix] = Self.marked(next.events[ix],"dot_push"); next.events[ix].sequence = next.seq; next.events[ix].reply = nil
         if next.events[ix].payloadDigest == nil { next.events[ix].payloadDigest = Self.digest(next.events[ix].payload) }
         next.events[ix].payload = Data()
@@ -483,7 +635,7 @@ public final class Hub: @unchecked Sendable {
         guard let ix = ledger.events.firstIndex(where: { $0.service == service && $0.id == id && ["queued","sending_banner"].contains($0.state) }),
               let sx = ledger.services.firstIndex(where: { $0.id == service && $0.destination == "herald" }) else { return }
         var next = ledger; next.seq += 1
-        next.receipts = (next.receipts ?? []) + [Receipt(service:service,id:id,sequence:next.seq,state:state,reply:reply)]
+        next.receipts = (next.receipts ?? []) + [Receipt(service:service,id:id,sequence:next.seq,state:state,reply:reply,recordedAt:Self.now())]
         next.events[ix] = Self.marked(next.events[ix],state); next.events[ix].sequence = next.seq; next.events[ix].reply = nil
         if state != "herald_unconfirmed" {
             if next.events[ix].payloadDigest == nil { next.events[ix].payloadDigest = Self.digest(next.events[ix].payload) }

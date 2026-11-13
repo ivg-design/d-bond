@@ -2,8 +2,8 @@
   "manifest_version": "0.3",
   "name": "d-bond",
   "display_name": "D-Bond",
-  "version": "0.1.2",
-  "description": "Pair a Claude Desktop chat with the local D-Bond service and exchange addressed messages through Dot.",
+  "version": "0.1.3",
+  "description": "Use one local D-Bond pairing for Dot messages and direct messages with other paired services.",
   "author": {"name": "IVG"},
   "server": {
     "type": "binary",

@@ -6,6 +6,7 @@ import DBondCore
 final class ConnectionsWindowController: NSObject, NSWindowDelegate {
     private let hub: Hub
     private let onAdd: () -> Void
+    private let onAgents, onLog, onBridge, onDotSetup: () -> Void
     private let onSetup: (ServiceView) -> Void
     private var window: NSWindow?
     private var rootView: ConnectionsRootView?
@@ -13,9 +14,10 @@ final class ConnectionsWindowController: NSObject, NSWindowDelegate {
     private var rows: [String: ConnectionRowView] = [:]
     private var refreshTimer: Timer?
 
-    init(hub: Hub, onAdd: @escaping () -> Void, onSetup: @escaping (ServiceView) -> Void) {
+    init(hub: Hub, onAdd: @escaping () -> Void, onSetup: @escaping (ServiceView) -> Void, onAgents: @escaping () -> Void, onLog: @escaping () -> Void, onBridge: @escaping () -> Void, onDotSetup: @escaping () -> Void) {
         self.hub = hub
         self.onAdd = onAdd
+        self.onAgents = onAgents; self.onLog = onLog; self.onBridge = onBridge; self.onDotSetup = onDotSetup
         self.onSetup = onSetup
         super.init()
     }
@@ -40,25 +42,27 @@ final class ConnectionsWindowController: NSObject, NSWindowDelegate {
 
     private func buildWindow() {
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 760, height: 540),
+            contentRect: NSRect(x: 0, y: 0, width: 820, height: 610),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
         )
-        window.title = "Connections"
-        window.minSize = NSSize(width: 620, height: 380)
+        window.title = "D-Bond · Connections"
+        window.minSize = NSSize(width: 650, height: 390)
         window.isReleasedWhenClosed = false
         window.appearance = NSAppearance(named: .darkAqua)
         window.delegate = self
 
         let title = NSTextField(labelWithString: "Connections")
         title.font = .systemFont(ofSize: 23, weight: .semibold)
-        let subtitle = NSTextField(labelWithString: "Pairing creates a local endpoint. A producer must be configured separately before events arrive.")
+        let subtitle = NSTextField(labelWithString: "Services and agent sessions paired with this Mac.")
         subtitle.font = .systemFont(ofSize: 12)
         subtitle.textColor = .secondaryLabelColor
         let add = NSButton(title: "Add Connection…", target: self, action: #selector(addConnection))
         add.bezelStyle = .rounded
         add.controlSize = .regular
+        add.image = NSImage(systemSymbolName:"plus",accessibilityDescription:nil)
+        add.imagePosition = .imageLeading
 
         let scroll = NSScrollView()
         scroll.drawsBackground = false
@@ -75,7 +79,17 @@ final class ConnectionsWindowController: NSObject, NSWindowDelegate {
         empty.textColor = .secondaryLabelColor
         empty.alignment = .center
 
-        let root = ConnectionsRootView(title: title, subtitle: subtitle, addButton: add, scrollView: scroll, emptyLabel: empty)
+        let agents = NSButton(title: "Agent Setup…", target: self, action: #selector(openAgents))
+        agents.bezelStyle = .rounded
+        agents.image = NSImage(systemSymbolName:"macwindow.badge.plus",accessibilityDescription:nil)
+        agents.imagePosition = .imageLeading
+        let more = NSPopUpButton(frame:.zero,pullsDown:true)
+        more.bezelStyle = .rounded
+        more.addItem(withTitle:"Bridge Tools")
+        for (name, action) in [("Connection Status…", #selector(openBridge)), ("Copy Dot Setup", #selector(copySetup))] {
+            let item = NSMenuItem(title:name,action:action,keyEquivalent:""); item.target=self; more.menu?.addItem(item)
+        }
+        let root = ConnectionsRootView(title: title, subtitle: subtitle, addButton: add, agents:agents, more:more, scrollView: scroll, emptyLabel: empty)
         root.wantsLayer = true
         root.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
         self.rootView = root
@@ -111,8 +125,13 @@ final class ConnectionsWindowController: NSObject, NSWindowDelegate {
             return row
         }
         documentView.setRows(orderedRows)
-        rootView.setEmpty(services.isEmpty)
+        rootView.setCounts(services.count, listening: services.filter { !$0.paused && ($0.subscribers + $0.directSubscribers > 0) }.count)
     }
+
+    @objc private func openAgents() { onAgents() }
+    @objc private func openLog() { onLog() }
+    @objc private func openBridge() { onBridge() }
+    @objc private func copySetup() { onDotSetup() }
 
     @objc private func addConnection() {
         onAdd()
@@ -139,7 +158,7 @@ final class ConnectionsWindowController: NSObject, NSWindowDelegate {
         let oldRules = service.sop?.rules ?? []
         var rules = oldRules
         while true {
-            let alert = NSAlert()
+            let alert = Brand.alert()
             alert.messageText = "Instructions for \(service.name)"
             alert.informativeText = "Choose one rule to edit or delete. Rule text may contain multiple paragraphs. Changes are saved together as a new version for future events."
             alert.addButton(withTitle: "Edit Selected")
@@ -181,7 +200,7 @@ final class ConnectionsWindowController: NSObject, NSWindowDelegate {
     }
 
     private func editRuleText(_ original: String, title: String) -> String? {
-        let alert = NSAlert()
+        let alert = Brand.alert()
         alert.messageText = title
         alert.informativeText = "Paste or edit the complete text. Paragraphs and line breaks belong to this one rule."
         alert.addButton(withTitle: "Keep Rule")
@@ -214,7 +233,7 @@ final class ConnectionsWindowController: NSObject, NSWindowDelegate {
                 let version = trace.sopVersion.map { " · rules v\($0)" } ?? ""
                 return "\(trace.eventID)\(version)\n\(stages)"
             }.joined(separator: "\n\n")
-            let alert = NSAlert()
+            let alert = Brand.alert()
             alert.messageText = "Recent events · \(service.name)"
             alert.informativeText = "Receipt times use this Mac’s timezone. broker_recorded is local state; native_observed is an observed native response. Neither alone proves a final reply."
             alert.addButton(withTitle: "Done")
@@ -238,7 +257,7 @@ final class ConnectionsWindowController: NSObject, NSWindowDelegate {
 
     private func confirmDelete(_ id: String) {
         guard let service = hub.snapshot().services.first(where: { $0.id == id }) else { return }
-        let alert = NSAlert()
+        let alert = Brand.alert()
         alert.alertStyle = .warning
         alert.messageText = "Delete \(service.name)?"
         alert.informativeText = "This revokes its local credential and deletes its queued events and receipts. A delivery already dispatching may still finish."
@@ -254,7 +273,7 @@ final class ConnectionsWindowController: NSObject, NSWindowDelegate {
     }
 
     private func showError(_ title: String, _ body: String) {
-        let alert = NSAlert()
+        let alert = Brand.alert()
         alert.messageText = title
         alert.informativeText = body
         alert.runModal()
@@ -265,18 +284,24 @@ final class ConnectionsWindowController: NSObject, NSWindowDelegate {
 private final class ConnectionsRootView: NSView {
     private let title: NSTextField
     private let subtitle: NSTextField
+    private let icon = NSImageView()
+    private let agents: NSButton
+    private let more: NSPopUpButton
     private let addButton: NSButton
     private let scrollView: NSScrollView
     private let emptyLabel: NSTextField
 
-    init(title: NSTextField, subtitle: NSTextField, addButton: NSButton, scrollView: NSScrollView, emptyLabel: NSTextField) {
+    init(title: NSTextField, subtitle: NSTextField, addButton: NSButton, agents:NSButton, more:NSPopUpButton, scrollView: NSScrollView, emptyLabel: NSTextField) {
         self.title = title
         self.subtitle = subtitle
         self.addButton = addButton
+        self.agents = agents; self.more = more
         self.scrollView = scrollView
         self.emptyLabel = emptyLabel
-        super.init(frame: NSRect(x: 0, y: 0, width: 760, height: 540))
+        super.init(frame: NSRect(x: 0, y: 0, width: 820, height: 610))
         autoresizingMask = [.width, .height]
+        icon.image = Brand.app; icon.imageScaling = .scaleProportionallyUpOrDown; addSubview(icon)
+        addSubview(agents); addSubview(more)
         addSubview(title)
         addSubview(subtitle)
         addSubview(addButton)
@@ -287,19 +312,26 @@ private final class ConnectionsRootView: NSView {
     required init?(coder: NSCoder) { nil }
     override var isFlipped: Bool { true }
 
-    func setEmpty(_ empty: Bool) {
-        emptyLabel.isHidden = !empty
+    func setCounts(_ total: Int, listening: Int) {
+        subtitle.stringValue = total == 0 ? "Connect a service or an agent to this Mac." : "\(total) paired · \(listening) listening now"
+        emptyLabel.isHidden = total != 0
         needsLayout = true
     }
 
     override func layout() {
         super.layout()
         let width = bounds.width
-        title.frame = NSRect(x: 24, y: 20, width: max(220, width - 240), height: 29)
-        subtitle.frame = NSRect(x: 25, y: 53, width: max(0, width - 50), height: 18)
-        let buttonSize = addButton.fittingSize
-        addButton.frame = NSRect(x: width - 24 - buttonSize.width, y: 19, width: buttonSize.width, height: max(30, buttonSize.height))
-        let listTop: CGFloat = 88
+        icon.frame = NSRect(x:20,y:13,width:54,height:54)
+        title.frame = NSRect(x:84,y:15,width:width - 110,height:30)
+        subtitle.frame = NSRect(x:85,y:47,width:width - 110,height:18)
+        let actionsY: CGFloat = 77
+        let size = addButton.fittingSize
+        addButton.frame = NSRect(x:20,y:actionsY,width:size.width,height:30)
+        let agentWidth = agents.fittingSize.width
+        agents.frame = NSRect(x:addButton.frame.maxX+6,y:actionsY,width:agentWidth,height:30)
+        let toolWidth = more.fittingSize.width
+        more.frame = NSRect(x:width-toolWidth-20,y:actionsY,width:toolWidth,height:30)
+        let listTop: CGFloat = 121
         let listHeight = max(0, bounds.height - listTop - 20)
         scrollView.frame = NSRect(x: 20, y: listTop, width: max(0, width - 40), height: listHeight)
         emptyLabel.frame = NSRect(x: 40, y: listTop + max(0, (listHeight - 42) / 2), width: max(0, width - 80), height: 42)
@@ -310,8 +342,8 @@ private final class ConnectionsRootView: NSView {
 @MainActor
 private final class ConnectionDocumentView: NSView {
     private var rows: [ConnectionRowView] = []
-    private let rowHeight: CGFloat = 112
-    private let rowGap: CGFloat = 10
+    private let rowHeight: CGFloat = 92
+    private let rowGap: CGFloat = 6
     override var isFlipped: Bool { true }
 
     func setRows(_ rows: [ConnectionRowView]) {
@@ -342,6 +374,7 @@ private final class ConnectionRowView: NSView {
     private let detail = NSTextField(labelWithString: "")
     private let pauseButton = NSButton(title: "Pause", target: nil, action: nil)
     private let deleteButton = NSButton(title: "Delete", target: nil, action: nil)
+    private let logo = NSImageView()
     private let setupButton = NSButton(title: "Setup", target: nil, action: nil)
     private let sopButton = NSButton(title: "Rules", target: nil, action: nil)
     private let traceButton = NSButton(title: "Events", target: nil, action: nil)
@@ -370,6 +403,7 @@ private final class ConnectionRowView: NSView {
         title.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         status.font = .systemFont(ofSize: 11, weight: .medium)
         statusDot.color = .systemGreen
+        logo.imageScaling = .scaleProportionallyUpOrDown; addSubview(logo)
         addSubview(title)
         addSubview(statusDot)
         addSubview(status)
@@ -404,9 +438,10 @@ private final class ConnectionRowView: NSView {
     override var isFlipped: Bool { true }
 
     func layoutContent() {
-        let left: CGFloat = 14
+        let left: CGFloat = 65
         let right: CGFloat = 14
-        let top: CGFloat = 12
+        let top: CGFloat = 8
+        logo.frame = NSRect(x:13,y:13,width:39,height:39)
         let controlsWidth = statusWidth + pauseWidth + deleteWidth + 22
         let titleWidth = max(100, bounds.width - left - right - controlsWidth - 16)
         title.frame = NSRect(x: left, y: top + 1, width: titleWidth, height: 23)
@@ -415,21 +450,22 @@ private final class ConnectionRowView: NSView {
         status.frame = NSRect(x: controlsX + 14, y: top + 2, width: statusWidth - 14, height: 20)
         pauseButton.frame = NSRect(x: controlsX + statusWidth, y: top - 1, width: pauseWidth, height: 26)
         deleteButton.frame = NSRect(x: controlsX + statusWidth + pauseWidth + 6, y: top - 1, width: deleteWidth, height: 26)
-        detail.frame = NSRect(x: left, y: top + 35, width: max(80, bounds.width - left - right), height: 18)
-        setupButton.frame = NSRect(x: left, y: top + 64, width: 64, height: 25)
-        sopButton.frame = NSRect(x: left + 72, y: top + 64, width: 64, height: 25)
-        traceButton.frame = NSRect(x: left + 144, y: top + 64, width: 64, height: 25)
+        detail.frame = NSRect(x: left, y: top + 26, width: max(80, bounds.width - left - right), height: 18)
+        setupButton.frame = NSRect(x: left, y: top + 49, width: 64, height: 25)
+        sopButton.frame = NSRect(x: left + 72, y: top + 49, width: 64, height: 25)
+        traceButton.frame = NSRect(x: left + 144, y: top + 49, width: 64, height: 25)
     }
 
     func update(_ service: ServiceView) {
         serviceID = service.id
+        logo.image = Brand.service(service)
         if title.text != service.name { title.text = service.name }
         let stateText: String
         let color: NSColor
         if service.paused {
             stateText = "Paused"
             color = .tertiaryLabelColor
-        } else if service.subscribers > 0 {
+        } else if service.subscribers + service.directSubscribers > 0 {
             stateText = "Listening"
             color = .systemGreen
         } else {
@@ -441,8 +477,11 @@ private final class ConnectionRowView: NSView {
         statusDot.color = color
         pauseButton.title = service.paused ? "Resume" : "Pause"
         pauseButton.toolTip = service.paused ? "Resume this connection" : "Pause this connection"
-        let destination = ["dot": "Dot", "herald": "Herald", "demo": "Local echo"][service.destination] ?? service.destination
-        let activity = service.subscribers == 0 ? "No open return stream" : "\(service.subscribers) return stream\(service.subscribers == 1 ? "" : "s")"
+        let destination = ["dot": "Dot", "peer": "Direct sessions", "herald": "Herald", "demo": "Local echo"][service.destination] ?? service.destination
+        var streams: [String] = []
+        if service.subscribers > 0 { streams.append("Dot messages") }
+        if service.directSubscribers > 0 { streams.append("Direct messages") }
+        let activity = streams.isEmpty ? "No active listener" : "Listening for " + streams.joined(separator:" and ").lowercased()
         let pending = service.queued + service.inFlight
         let queue = pending == 0 ? "" : " · \(pending) queued or dispatching"
         let seen = service.lastSeen.map { " · last event \(displayTraceTime($0))" } ?? ""

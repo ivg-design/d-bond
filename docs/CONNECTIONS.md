@@ -10,6 +10,8 @@ Quit an older running D-Bond before upgrading. If it was already listed under **
 
 The app runs in the menu bar. Opening it again brings up **Connections**. A fresh installation can test **Local demo echo** immediately. To reach your actual Dot you also need your own compatible Dot Bridge Transport and its single native `d-bond` subscription. Installing the Mac app alone doesn't create that account connection.
 
+**Connect agents** opens the packaged Claude Desktop extension, installs the local Claude Code channel plugin or Codex tools through their host CLIs when you click the relevant button, and copies a generic stdio MCP configuration. Claude Desktop still asks you to approve and enable its extension. Claude Code still requires channel opt-in in the intended session. The Codex install adds both local controls and direct messaging tools; a new chat may be needed for discovery. The setup window lists only paired, unpaused agents with an active direct listener for its optional **Send setup note** action. That action records delivery to the listener, not an AI turn or answer. For an unpaired or idle chat, copy the note and paste it into the exact chat yourself.
+
 ## Connect a service
 
 2. Select the destination. For a browser extension that calls the broker directly, enter the exact extension ID from Chrome. Copy the endpoint and one-time secret into that service’s local settings. Existing connections have a **Setup** button with instructions. A pairing is saved even when the service is offline; in the window, “connected” means a receiver is listening.
@@ -35,3 +37,8 @@ In **Connections**, choose **Rules** beside the service, add a rule, paste the i
 The service keeps the same endpoint, credential and event ID across restarts. Reopen the receipt stream with the last sequence your service durably handled. If a POST response is lost, resend the same ID and unchanged payload; creating a new ID starts a new message. The broker retries temporary transport failures with backoff. It checks the native request store before sending again. A rejected or unsafe-to-replay message has an explicit receipt. A paused or deleted link does not silently become active.
 
 The native Dot subscription and its account grant are separate from your service pairing. The host can renew them automatically; an owner revocation, a disabled grant, or a missed host renewal can still prevent a wake. While Dot is offline, its stored messages are subject to the native host's expiry. The broker can restart the Mac app and its observer; it cannot wake a powered-off computer or guarantee Dot's response time.
+
+## Service icons and settings
+
+
+[Direct agent messages](../adapters/direct/README.md) documents the CLI commands, stdio tools, streaming inbox, and which setup steps need an open client session.

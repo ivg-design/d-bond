@@ -56,7 +56,7 @@ func run() throws {
             case "pair":
                 let sop=try object["sop"].map { try JSONDecoder().decode(OwnerSOP.self,from:JSONSerialization.data(withJSONObject:$0)) }
                 let destination=object["destination"] as? String ?? "demo"
-                guard ["demo", "dot"].contains(destination) else { throw ProbeError() }
+                guard ["demo", "dot", "peer"].contains(destination) else { throw ProbeError() }
                 let p=try hub.pair(name:object["name"] as? String ?? "",destination:destination,
                                    chromeOrigin:object["chromeOrigin"] as? String,sop:sop)
                 try emit(["id":p.id,"endpoint":p.endpoint,"secret":p.secret])
@@ -82,7 +82,7 @@ func run() throws {
         }
         if command == "status" { try emit(["bridge":hub.bridgeStatus(),"herald":hub.heraldStatus()]); continue }
         if command == "list" {
-            try emit(["services":hub.snapshot().services.map { ["id":$0.id,"name":$0.name,"endpoint":$0.endpoint,"destination":$0.destination,"paused":$0.paused,"queued":$0.queued,"in_flight":$0.inFlight,"subscribers":$0.subscribers] as [String:Any] }])
+            try emit(["services":hub.snapshot().services.map { ["id":$0.id,"name":$0.name,"endpoint":$0.endpoint,"destination":$0.destination,"paused":$0.paused,"queued":$0.queued,"in_flight":$0.inFlight,"subscribers":$0.subscribers,"directSubscribers":$0.directSubscribers] as [String:Any] }])
             continue
         }
         if command.hasPrefix("pause ") || command.hasPrefix("resume ") {

@@ -36,7 +36,8 @@ def _local_trace_time(raw: str) -> str:
         parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
         if parsed.tzinfo is None:
             parsed = parsed.astimezone()
-        return parsed.astimezone().strftime("%b %-d, %Y, %-I:%M:%S %p %Z")
+        local = parsed.astimezone()
+        return local.strftime("%b %-d, %Y, %-I:%M:%S %p %Z")
     except (TypeError, ValueError, OverflowError):
         return raw
 
@@ -136,6 +137,7 @@ def _read_pairing(alias: str) -> dict:
             value = json.load(src)
             validated = validate_pairing(value)
             validated["cursor"] = value.get("cursor", 0)
+            validated["direct_cursor"] = value.get("direct_cursor", 0)
             validated["pushes"] = value.get("pushes", [])
             return validated
     except FileNotFoundError:
@@ -292,6 +294,7 @@ def _save(alias: str, pairing: dict) -> None:
         if path.exists():
             existing = _read_pairing(alias)
             merged["cursor"] = max(int(existing.get("cursor", 0)), int(pairing.get("cursor", 0)))
+            merged["direct_cursor"] = max(int(existing.get("direct_cursor", 0)), int(pairing.get("direct_cursor", 0)))
             merged["pushes"] = list(dict.fromkeys(existing.get("pushes", []) + pairing.get("pushes", [])))[-256:]
         _atomic_json(path, merged)
     finally:
@@ -337,6 +340,8 @@ def command_enroll(args) -> None:
             client.connect(str(OWNER_SOCKET))
             name = enrollment_name(args)
             frame = {"op": "pair", "name": name}
+            if getattr(args, "direct", False):
+                frame["destination"] = "peer"
             chrome_id = getattr(args, "chrome_id", None)
             if chrome_id is not None:
                 if not re.fullmatch(r"[a-p]{32}", chrome_id):
@@ -365,7 +370,9 @@ def command_enroll(args) -> None:
         pairing = validate_pairing(value)
         _atomic_json(path, pairing)
         print(json.dumps({"linked": args.alias, "endpoint": pairing["endpoint"]}))
-        if getattr(args, "client", None) == "claude" or name.startswith("Claude / "):
+        if getattr(args, "direct", False):
+            print(f"To receive direct messages, run: dbond direct-listen {args.alias}", file=sys.stderr)
+        elif getattr(args, "client", None) == "claude" or name.startswith("Claude / "):
             print(
                 "To receive incoming messages, start this command with Monitor in the paired Claude chat: "
                 f"dbond listen {args.alias} --push-only",
@@ -489,11 +496,95 @@ def _peers(pairing: dict) -> list[dict]:
     return services
 
 
+def _direct_url(pairing: dict) -> str:
+    return pairing["endpoint"].removesuffix("/events") + "/messages"
+
+
+def _direct_peers(pairing: dict) -> list[dict]:
+    status, body = _request(pairing, "GET", _direct_url(pairing) + "/peers")
+    if status != 200 or not isinstance(body.get("services"), list):
+        fail("Could not list direct D-Bond recipients.")
+    return body["services"]
+
+
+def _direct_target(pairing: dict, value: str) -> str:
+    peers = _direct_peers(pairing)
+    matches = [row for row in peers if row.get("id") == value.lower() or row.get("name", "").casefold() == value.casefold()]
+    if len(matches) != 1 or matches[0].get("paused") is True:
+        fail("Use one active direct recipient name or ID from `dbond direct-peers`.")
+    return matches[0]["id"]
+
+
+def command_direct_peers(args) -> None:
+    print(json.dumps(_direct_peers(_read_pairing(args.alias)), ensure_ascii=False))
+
+
+def command_direct_send(args) -> None:
+    pairing = _read_pairing(args.alias)
+    target = _direct_target(pairing, args.to)
+    message_id = args.message_id or str(uuid.uuid4())
+    if not EVENT_RE.fullmatch(message_id) or message_id.startswith("@dot:"):
+        fail("Direct message ID is invalid or reserved.")
+    body = {"id": message_id, "to": target, "text": args.text}
+    if getattr(args, "in_reply_to", None):
+        body["in_reply_to"] = args.in_reply_to
+    status, receipt = _request(pairing, "POST", _direct_url(pairing), body)
+    if status not in (200, 202) or receipt.get("id") != message_id:
+        fail("D-Bond returned an invalid direct-message receipt.")
+    print(json.dumps({"id": message_id, "to": target, "sequence": receipt.get("sequence"),
+                      "duplicate": receipt.get("duplicate"), "state": "broker_recorded"}, ensure_ascii=False))
+
+
+def command_direct_inbox(args) -> None:
+    pairing = _read_pairing(args.alias)
+    after = pairing.get("direct_cursor", 0) if args.after is None else args.after
+    if type(after) is not int or after < 0:
+        fail("Direct inbox cursor must be a nonnegative sequence.")
+    status, body = _request(pairing, "GET", _direct_url(pairing) + "?after=" + str(after), timeout=15)
+    if status != 200 or not isinstance(body.get("messages"), list):
+        fail("D-Bond returned an invalid direct inbox.")
+    rows = body["messages"]
+    if args.advance and rows:
+        pairing["direct_cursor"] = max(row["sequence"] for row in rows)
+        _save(args.alias, pairing)
+    print(json.dumps({"messages": rows, "after": after}, ensure_ascii=False))
+
+
+def command_direct_listen(args) -> None:
+    pairing = _read_pairing(args.alias)
+    cursor = pairing.get("direct_cursor", 0)
+    delay = 0.5
+    try:
+        while True:
+            stream = None
+            try:
+                stream = Stream({**pairing, "endpoint": _direct_url(pairing)}, cursor)
+                while True:
+                    event = stream.next_event()
+                    if event is None:
+                        raise ConnectionError("Direct stream closed.")
+                    print(json.dumps(event, ensure_ascii=False), flush=True)
+                    cursor = pairing["direct_cursor"] = event["sequence"]
+                    _save(args.alias, pairing)
+                    delay = 0.5
+            except (OSError, ConnectionError):
+                time.sleep(delay)
+                delay = min(20, delay * 2)
+            finally:
+                if stream:
+                    stream.close()
+    except KeyboardInterrupt:
+        return
+
+
 def command_trace(args) -> None:
     if not SESSION_ID_RE.fullmatch(args.connection_id):
         fail("Use the exact connection UUID shown by `dbond peers` or the D-Bond app.")
     try:
-        value = _owner_request({"op": "trace", "id": args.connection_id, "eventID": args.event_id}) if args.event_id else _owner_request({"op": "list_events", "id": args.connection_id, "limit": args.limit})
+        if args.event_id:
+            value = _owner_request({"op": "trace", "id": args.connection_id, "eventID": args.event_id})
+        else:
+            value = _owner_request({"op": "list_events", "id": args.connection_id, "limit": args.limit})
     except (OSError, ValueError) as exc:
         fail(f"Could not read the local event trace: {exc}")
     print(json.dumps(_format_trace(value), ensure_ascii=False))
@@ -645,7 +736,7 @@ def parser() -> argparse.ArgumentParser:
     link.add_argument("alias")
     link.add_argument("--file", help="JSON pairing file; use - or omit to read JSON from stdin")
     link.set_defaults(run=command_link)
-    enroll = sub.add_parser("enroll", help="create a new Dot service pairing through the running D-Bond app")
+    enroll = sub.add_parser("enroll", help="create a new service pairing through the running D-Bond app")
     enroll.add_argument("alias")
     enroll.add_argument("--name", help="display name shown in the D-Bond menu")
     enroll.add_argument("--chrome-id", help="allow only this Chrome extension origin to use this pairing in a browser")
@@ -654,6 +745,7 @@ def parser() -> argparse.ArgumentParser:
     enroll.add_argument("--client", choices=("claude", "codex"), help="local client identity for the session")
     enroll.add_argument("--session-id", help="exact client session UUID; never inferred from nearby chats")
     enroll.add_argument("--title", help="title supplied by the host; preferred over local metadata")
+    enroll.add_argument("--direct", action="store_true", help="create a direct-only pairing; existing Dot pairings can also use direct messaging")
     enroll.set_defaults(run=command_enroll)
     ask = sub.add_parser("ask", help="submit a question and await a Dot ACK or reply")
     ask.add_argument("alias"); ask.add_argument("question")
@@ -664,6 +756,22 @@ def parser() -> argparse.ArgumentParser:
     peers = sub.add_parser("peers", help="list connections by their D-Bond names and IDs")
     peers.add_argument("alias", help="your own paired alias")
     peers.set_defaults(run=lambda args: print(json.dumps(_peers(_read_pairing(args.alias)), ensure_ascii=False)))
+    direct_peers = sub.add_parser("direct-peers", help="list direct recipients (existing Dot and direct-only pairings)")
+    direct_peers.add_argument("alias"); direct_peers.set_defaults(run=command_direct_peers)
+    direct_send = sub.add_parser("direct-send", help="send directly to another paired service without Dot")
+    direct_send.add_argument("alias"); direct_send.add_argument("to", help="exact recipient ID or display name"); direct_send.add_argument("text")
+    direct_send.add_argument("--message-id", help="stable ID for safe retry after an interrupted POST")
+    direct_send.set_defaults(run=command_direct_send)
+    direct_answer = sub.add_parser("direct-answer", help="answer a direct message from the same paired sender")
+    direct_answer.add_argument("alias"); direct_answer.add_argument("to", help="original sender ID"); direct_answer.add_argument("in_reply_to", help="original direct message ID"); direct_answer.add_argument("text")
+    direct_answer.add_argument("--message-id", help="stable ID for safe retry after an interrupted POST")
+    direct_answer.set_defaults(run=lambda args: command_direct_send(type("DirectArgs", (), {"alias":args.alias,"to":args.to,"text":args.text,"in_reply_to":args.in_reply_to,"message_id":args.message_id})()))
+    direct_inbox = sub.add_parser("direct-inbox", help="read durable direct messages after a sequence")
+    direct_inbox.add_argument("alias"); direct_inbox.add_argument("--after", type=int, default=None)
+    direct_inbox.add_argument("--advance", action="store_true", help="advance the saved direct cursor")
+    direct_inbox.set_defaults(run=command_direct_inbox)
+    direct_listen = sub.add_parser("direct-listen", help="hold an event-driven direct-message stream and resume on reconnect")
+    direct_listen.add_argument("alias"); direct_listen.set_defaults(run=command_direct_listen)
     trace = sub.add_parser("trace", help="show recent local event traces in this Mac's timezone")
     trace.add_argument("connection_id", help="exact connection UUID")
     trace.add_argument("event_id", nargs="?", help="optional exact event ID")

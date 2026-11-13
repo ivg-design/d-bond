@@ -47,16 +47,18 @@ public final class OwnerSocket {
                     func output(_ value:[String:Any]) throws -> Data { try JSONSerialization.data(withJSONObject:value,options:[.sortedKeys]) }
                     switch op {
                     case "pair":
-                        guard let name=obj["name"] as? String, Set(obj.keys).isSubset(of:["op","name","sop","chromeOrigin"]),
+                        guard let name=obj["name"] as? String, Set(obj.keys).isSubset(of:["op","name","sop","chromeOrigin","destination"]),
                               obj["chromeOrigin"] == nil || obj["chromeOrigin"] is String else {throw Fault.message("Invalid pairing request.")}
-                        reply=try JSONEncoder().encode(hub.pair(name:name,destination:"dot",chromeOrigin:obj["chromeOrigin"] as? String,sop:try sop(obj["sop"])))
+                        let destination=obj["destination"] as? String ?? "dot"
+                        guard ["dot","peer"].contains(destination) else { throw Fault.message("Invalid pairing destination.") }
+                        reply=try JSONEncoder().encode(hub.pair(name:name,destination:destination,chromeOrigin:obj["chromeOrigin"] as? String,sop:try sop(obj["sop"])))
                     case "rename":
                         guard Set(obj.keys)==["op","id","name"],let id=obj["id"] as? String,let name=obj["name"] as? String else {throw Fault.message("Invalid rename request.")}
                         try hub.rename(id:id,name:name);reply=Data(#"{"renamed":true}"#.utf8)
                     case "list":
                         guard Set(obj.keys)==["op"] else {throw Fault.message("Invalid list request.")}
                         let rows=hub.snapshot().services.map { row -> [String:Any] in
-                            ["id":row.id,"name":row.name,"destination":row.destination,"paused":row.paused,"sopVersion":row.sop?.version ?? 0]
+                            ["id":row.id,"name":row.name,"destination":row.destination,"paused":row.paused,"sopVersion":row.sop?.version ?? 0,"directSubscribers":row.directSubscribers]
                         }
                         reply=try output(["services":rows])
                     case "get_sop":
@@ -76,6 +78,11 @@ public final class OwnerSocket {
                         guard Set(obj.keys)==["op","id","eventID"],let id=obj["id"] as? String,let eventID=obj["eventID"] as? String else {throw Fault.message("Invalid trace request.")}
                         let event=try hub.eventTrace(service:id,eventID:eventID)
                         reply=try output(["event":try event.map { try JSONSerialization.jsonObject(with:JSONEncoder().encode($0)) } ?? NSNull()])
+                    case "send_direct_note":
+                        guard Set(obj.keys)==["op","to","id","text"],let to=obj["to"] as? String,
+                              let id=obj["id"] as? String,let text=obj["text"] as? String else { throw Fault.message("Invalid owner direct note request.") }
+                        let sequence=try hub.sendOwnerDirectNote(to:to,id:id,text:text)
+                        reply=try output(["id":id,"to":to,"sequence":sequence,"state":"sent_to_listener"])
                     default: throw Fault.message("Invalid owner operation.")
                     }
                 } catch { reply=(try? JSONSerialization.data(withJSONObject:["error":String(describing:error)])) ?? Data(#"{"error":"Owner request failed."}"#.utf8) }

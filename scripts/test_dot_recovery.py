@@ -126,6 +126,7 @@ def run():
             assert request(base + f"/v1/services/{ident}/events", key, {"id": "crash", "payload": {"fixtureDot": True}})[1]["duplicate"] is True
             first_row = await_state(base, ident, key, "crash", "dot_stored")
             assert first_row["reply"] == "fixture crash"
+            assert first_row["recorded_at"] and first_row["recorded_at"] == await_state(base,ident,key,"crash","dot_stored")["recorded_at"]
             assert attempts["crash"] == 2, attempts
             assert logical == {"crash"}, logical
 

@@ -23,30 +23,36 @@ def exchange(channel=False, interpreter=None, native=False):
             bundle.extractall(temp)
         env = dict(os.environ, HOME=str(temp), PATH="/usr/bin:/bin")
         server = None
+        service_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        sender_id = "bbbbbbbb-cccc-dddd-eeee-ffffffffffff"
         if channel:
             env.update(DBOND_CLAUDE_CHANNEL="1", DBOND_CLAUDE_ALIAS="claude-document-review")
-            service_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
-            class Endpoint(BaseHTTPRequestHandler):
-                def log_message(self, *_):
-                    pass
-                def do_GET(self):
-                    self.send_response(200)
-                    self.send_header("Content-Type", "text/event-stream")
-                    self.end_headers()
-                    if self.path.endswith("after=0"):
-                        assert self.headers.get("Authorization") == "Bearer c2VjcmV0"
+        class Endpoint(BaseHTTPRequestHandler):
+            def log_message(self, *_):
+                pass
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.end_headers()
+                if self.path.endswith("after=0"):
+                    assert self.headers.get("Authorization") == "Bearer c2VjcmV0"
+                    if "/messages/stream" in self.path:
+                        row = {"id": "direct-9", "sequence": 2, "from": sender_id, "to": service_id,
+                               "text": "What changed?", "in_reply_to": None}
+                        self.wfile.write(f"id: 2\ndata: {json.dumps(row)}\n\n".encode())
+                    else:
                         row = {"id": "@dot:9", "sequence": 1, "state": "dot_push", "reply": "Review the design?"}
                         self.wfile.write(f"id: 1\ndata: {json.dumps(row)}\n\n".encode())
-                        self.wfile.flush()
-                    time.sleep(0.2)
-            server = ThreadingHTTPServer(("127.0.0.1", 0), Endpoint)
-            threading.Thread(target=server.serve_forever, daemon=True).start()
-            store = temp / "Library/Application Support/D-Bond CLI"
-            store.mkdir(parents=True, mode=0o700)
-            pairing = store / "claude-document-review.json"
-            pairing.write_text(json.dumps({"endpoint": f"http://127.0.0.1:{server.server_port}/v1/services/{service_id}/events",
-                                           "secret": "c2VjcmV0", "cursor": 0, "pushes": []}))
-            pairing.chmod(0o600)
+                    self.wfile.flush()
+                time.sleep(0.2)
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Endpoint)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        store = temp / "Library/Application Support/D-Bond CLI"
+        store.mkdir(parents=True, mode=0o700)
+        pairing = store / "claude-document-review.json"
+        pairing.write_text(json.dumps({"endpoint": f"http://127.0.0.1:{server.server_port}/v1/services/{service_id}/events",
+                                       "secret": "c2VjcmV0", "cursor": 0, "direct_cursor": 0, "pushes": []}))
+        pairing.chmod(0o600)
         entry = [interpreter, str(temp / "server/mcp.py")] if interpreter else ["/bin/sh", str(temp / "server/launch.sh")]
         if native:
             launcher = temp / "server/d-bond-launcher"
@@ -73,25 +79,42 @@ def exchange(channel=False, interpreter=None, native=False):
             proc.stdin.write('{"jsonrpc":"2.0","method":"notifications/initialized"}\n')
             proc.stdin.flush()
             tools = request(2, "tools/list")["result"]["tools"]
-            expected = {"enroll", "peers", "ask", "answer"}
+            expected = {"enroll", "peers", "ask", "answer", "direct_peers", "direct_send", "direct_answer"}
             if not channel:
-                expected.add("wait_for_push")
+                expected.update(("wait_for_push", "wait_for_direct"))
             assert {t["name"] for t in tools} == expected
             if channel:
                 assert "alias" not in tools[0]["inputSchema"]["properties"]
             bad = request(3, "tools/call", {"name": "peers", "arguments": {"alias": "missing"}})
             assert bad["result"]["isError"]
             if channel:
-                if not notifications:
+                while len([row for row in notifications if row.get("method") == "notifications/claude/channel"]) < 2:
                     with selectors.DefaultSelector() as ready:
                         ready.register(proc.stdout, selectors.EVENT_READ)
                         assert ready.select(5), "channel did not emit its addressed push"
                     notifications.append(json.loads(proc.stdout.readline()))
-                push = next(row for row in notifications if row.get("method") == "notifications/claude/channel")
+                push = next(row for row in notifications if row.get("params", {}).get("meta", {}).get("source_id") == "@dot:9")
                 assert push["params"] == {"content": "Review the design?",
                                           "meta": {"source_id": "@dot:9", "sequence": "1"}}
-                saved = json.loads(pairing.read_text())
-                assert saved["cursor"] == 1 and "@dot:9" in saved["pushes"]
+                direct = next(row for row in notifications if row.get("params", {}).get("meta", {}).get("source_id") == "direct-9")
+                assert direct["params"] == {"content": "What changed?", "meta": {
+                    "source": "d-bond-direct", "source_id": "direct-9", "sender_id": sender_id, "sequence": "2"}}
+                until=time.monotonic()+2
+                while time.monotonic()<until:
+                    saved = json.loads(pairing.read_text())
+                    if saved.get("cursor")==1 and saved.get("direct_cursor")==2: break
+                    time.sleep(.02)
+                assert saved["cursor"] == 1 and "@dot:9" in saved["pushes"] and saved["direct_cursor"] == 2
+            else:
+                waited = request(4, "tools/call", {"name": "wait_for_direct", "arguments": {
+                    "alias": "claude-document-review", "timeout": 2}})
+                result = json.loads(waited["result"]["content"][0]["text"])
+                assert result == {"state": "direct_message", "id": "direct-9", "sender_id": sender_id,
+                                  "text": "What changed?", "in_reply_to": None, "sequence": 2}
+                until=time.monotonic()+2
+                while json.loads(pairing.read_text()).get("direct_cursor") != 2 and time.monotonic()<until:
+                    time.sleep(.02)
+                assert json.loads(pairing.read_text())["direct_cursor"] == 2
         finally:
             proc.stdin.close()
             proc.wait(timeout=5)
@@ -128,6 +151,32 @@ def enrollment_reuse():
             assert sent[0][3] == "Claude / Design review"
 
 
+def direct_tool_commands():
+    sys.path.insert(0, str(ROOT / "adapters/claude/plugin/server"))
+    import mcp
+    commands=[]
+    with mock.patch.object(mcp, "cli", side_effect=lambda *args: commands.append(args) or {"stored": True}):
+        mcp.call_tool("direct_peers", {"alias": "fixture"})
+        mcp.call_tool("direct_send", {"alias": "fixture", "to": "Claude / Review", "text": "Question", "message_id": "direct-q-1"})
+        mcp.call_tool("direct_answer", {"alias": "fixture", "sender_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+                                         "source_id": "direct-q-1", "text": "Answer", "message_id": "direct-r-1"})
+    assert commands == [("direct-peers", "fixture"),
+                        ("direct-send", "fixture", "Claude / Review", "Question", "--message-id", "direct-q-1"),
+                        ("direct-answer", "fixture", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "direct-q-1", "Answer", "--message-id", "direct-r-1")]
+    pairing = {"endpoint": "http://127.0.0.1:18768/v1/services/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/events"}
+    owner_note = {"id": "owner-setup-1", "sequence": 3, "from": "owner",
+                  "to": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "text": "Setup note"}
+    assert mcp.valid_direct(owner_note, pairing)["sender_id"] == "owner"
+    with mock.patch.object(mcp, "cli") as sender:
+        try:
+            mcp.direct_send("fixture", "owner", "Unsafe answer", source_id="owner-setup-1")
+        except ValueError as exc:
+            assert "paired service" in str(exc)
+        else:
+            raise AssertionError("owner note incorrectly accepted as an answer target")
+        sender.assert_not_called()
+
+
 if __name__ == "__main__":
     exchange()
     exchange(True)
@@ -135,4 +184,5 @@ if __name__ == "__main__":
     exchange(True, interpreter="/usr/bin/python3")
     exchange(native=True)
     enrollment_reuse()
-    print("PASS: packed MCP entry point under GUI PATH and macOS Python 3.9, channel push, and pairing reuse")
+    direct_tool_commands()
+    print("PASS: packed MCP entry points, Dot/direct channel pushes, manual direct wait, correlated tool commands, and pairing reuse")

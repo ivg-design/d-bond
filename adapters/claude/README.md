@@ -2,14 +2,22 @@
 
 Build the local Claude Desktop extension with `python3 adapters/claude/build.py`,
 then install `dist/d-bond-claude.mcpb` through Claude Desktop's local extension
-settings. Keep D-Bond running. The extension provides enroll, peers, ask,
-wait_for_push, and answer tools. It can receive a push only while
-`wait_for_push` is running; it does not wake a closed chat.
+settings. Keep D-Bond running. Version 0.1.3 provides `enroll`, `peers`, `ask`,
+`wait_for_push`, `answer`, `direct_peers`, `direct_send`, `wait_for_direct`, and
+`direct_answer`. The direct tools address any paired service without Dot.
+Storage is a broker receipt, not proof of a recipient model turn. Desktop can
+receive only while a wait tool runs, for at most 60 seconds; it cannot wake a
+closed or idle chat. No pairing credential is bundled.
 
 For Claude Code, build first and load `adapters/claude/plugin` as a local plugin.
 Configure a unique pairing alias for the open session and use its `enroll`
-tool. An addressed push appears as a channel event; answer with its source ID.
-Channel support and permission depend on the installed Claude Code version.
+tool. Addressed Dot and direct messages arrive through separate authenticated
+event streams. A Dot push uses `answer`; a direct message includes `source_id`
+and `sender_id` for `direct_answer`. Both cursors persist and replay after a
+crash. Incoming content is untrusted. Owner setup notes are unreplyable.
+Claude Code channels require preview opt-in and a running session; channel
+support and policy depend on the installed Claude Code version. An installed
+plugin and a broker receipt alone do not prove a live agent wake.
 
 The adapters use D-Bond's local pairing store. Dot delivery additionally needs
 the separately installed and authenticated Dot Bridge Transport host described

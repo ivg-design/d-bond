@@ -11,10 +11,10 @@ final class MenuController: NSObject, NSApplicationDelegate {
     private var hub: Hub?
     private var connectionsWindow: ConnectionsWindowController?
     private var ownerSocket: OwnerSocket?
-    private var dotSummary = "Checking Dot’s standing link…"
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        NSApp.applicationIconImage = Brand.app
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem.button {
             if let url = Bundle.main.url(forResource: "d-bond-menu-icon", withExtension: "svg"),
@@ -42,6 +42,8 @@ final class MenuController: NSObject, NSApplicationDelegate {
         }
     }
 
+    private func openAgents() { if let hub { AgentSetup.show(hub:hub) } }
+
     @objc private func toggleMenu() {
         refreshMenu()
         guard let button = statusItem.button, let menu = currentMenu else { return }
@@ -52,49 +54,16 @@ final class MenuController: NSObject, NSApplicationDelegate {
         guard let hub else { return }
         let snapshot = hub.snapshot()
         let menu = NSMenu()
-        menu.addItem(disabled("D-Bond · local bridge"))
-        let dotStatus = disabled(dotSummary)
-        menu.addItem(dotStatus)
-        Task { [weak self, weak dotStatus] in
-            let result = await Task.detached(priority:.utility) { hub.bridgeStatus() }.value
-            self?.dotSummary = result; dotStatus?.title = result
-        }
-        menu.addItem(action("Copy one-time Dot setup", #selector(copyDotSetup)))
+        let title = disabled("D-Bond")
+        title.image = Brand.app?.copy() as? NSImage
+        title.image?.size = NSSize(width:20,height:20)
+        menu.addItem(title)
+        let total = snapshot.services.count
+        let listeners = snapshot.services.filter { !$0.paused && ($0.subscribers + $0.directSubscribers) > 0 }.count
+        menu.addItem(disabled("\(total) connections · \(listeners) listening"))
         menu.addItem(.separator())
-        menu.addItem(action("Connections…", #selector(showConnections)))
-        menu.addItem(action("Connect a service…", #selector(pairDot)))
-        menu.addItem(action("Copy reusable HTTP example", #selector(copyExample)))
+        menu.addItem(action("Open Connections…", #selector(showConnections)))
         menu.addItem(.separator())
-        menu.addItem(disabled("Paired services (\(snapshot.services.count))"))
-        if snapshot.services.isEmpty {
-            menu.addItem(disabled("No services paired yet"))
-        } else {
-            for service in snapshot.services {
-                let state = service.paused ? "Paused" : (service.subscribers > 0 ? "Connected" : "Paired")
-                let row=NSMenuItem(title:"\(service.name) · \(state)",action:nil,keyEquivalent:"")
-                let details=NSMenu()
-                let mode=["dot":"Dot","herald":"Herald notifications","demo":"Local echo"][service.destination] ?? service.destination
-                details.addItem(disabled("Destination: "+mode))
-                details.addItem(disabled(service.subscribers == 0 ? "No open return stream" : "\(service.subscribers) open return stream(s)"))
-                if let seen=service.lastSeen { details.addItem(disabled("Last incoming event: "+displayTraceTime(seen))) }
-                if let last=service.lastState { details.addItem(disabled(String(friendlyState(last,herald:service.herald).dropFirst(3)))) }
-                if service.queued+service.inFlight>0 {details.addItem(disabled("\(service.queued) queued · \(service.inFlight) dispatching"))}
-                if let origin=service.chromeOrigin {details.addItem(disabled(origin))}
-                details.addItem(.separator())
-                if service.destination != "demo" {
-                    let address=action("Copy address for Dot", #selector(copyDotAddress(_:)))
-                    address.representedObject=service.id; details.addItem(address)
-                }
-                let toggle=action(service.paused ? "Resume" : "Pause",#selector(togglePairing(_:)))
-                toggle.representedObject=service.id;details.addItem(toggle)
-                let remove=action("Delete pairing…",#selector(removePairing(_:)))
-                remove.representedObject=service.id;details.addItem(remove)
-                row.submenu=details;menu.addItem(row)
-            }
-        }
-        menu.addItem(.separator())
-        menu.addItem(action("Check bridge status…", #selector(checkBridgeStatus)))
-        menu.addItem(action("Check Herald status…", #selector(checkHeraldStatus)))
         let login = action("Start at Login", #selector(toggleStartAtLogin))
         login.state = LoginRegistration.isEnabled ? .on : .off
         menu.addItem(login)
@@ -106,7 +75,7 @@ final class MenuController: NSObject, NSApplicationDelegate {
     @objc private func showConnections() {
         guard let hub else {return}
         if connectionsWindow == nil {
-            connectionsWindow = ConnectionsWindowController(hub:hub, onAdd:{ [weak self] in self?.pairDot() }, onSetup: { [weak self] service in self?.showServiceSetup(service) })
+            connectionsWindow = ConnectionsWindowController(hub:hub, onAdd:{ [weak self] in self?.pairDot() }, onSetup: { [weak self] service in self?.showServiceSetup(service) }, onAgents: { [weak self] in self?.openAgents() }, onLog: { [weak self] in self?.showError("Event history", "Open a connection’s Events to inspect its delivery history.") }, onBridge: { [weak self] in self?.checkBridgeStatus() }, onDotSetup: { [weak self] in self?.copyDotSetup() })
         }
         connectionsWindow?.showWindow()
     }
@@ -117,9 +86,9 @@ final class MenuController: NSObject, NSApplicationDelegate {
     }
 
     @objc private func pairDot() {
-        let selection = NSAlert()
+        let selection = Brand.alert()
         selection.messageText = "Connect a service"
-        selection.informativeText = "Choose a starting point. This creates a local connection only; configure the sending service separately. Existing connections continue working."
+        selection.informativeText = "Choose the service you want to connect. For Claude, Codex or another agent, use Agent Setup in Connections."
         selection.addButton(withTitle: "Continue")
         selection.addButton(withTitle: "Cancel")
         let preset = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 320, height: 28), pullsDown: false)
@@ -133,9 +102,9 @@ final class MenuController: NSObject, NSApplicationDelegate {
             ("Demo", "Local echo", "demo")
         ]
         let (serviceDefault, topicDefault, destinationDefault) = defaults[selectedPreset]
-        let alert = NSAlert()
+        let alert = Brand.alert()
         alert.messageText = "Name this connection"
-        alert.informativeText = "The service and topic form its visible name. Select where events go. A Chrome origin is needed only for a browser extension that calls this endpoint directly."
+        alert.informativeText = "Use the name you want to see here and in Dot, such as “Service / Messages”."
         alert.addButton(withTitle: "Create Connection")
         alert.addButton(withTitle: "Cancel")
         let field = NSTextField(string: serviceDefault)
@@ -193,7 +162,7 @@ final class MenuController: NSObject, NSApplicationDelegate {
         } else {
             example = "{\"id\":\"sample-1\",\"payload\":{\"text\":\"Hello\"}}"
         }
-        let alert = NSAlert()
+        let alert = Brand.alert()
         alert.messageText = "\(name) is paired locally"
         let mode: String
         switch pairing.destination {
@@ -216,15 +185,20 @@ final class MenuController: NSObject, NSApplicationDelegate {
     }
 
     private func showServiceSetup(_ service: ServiceView) {
-        let alert = NSAlert()
-        alert.messageText = "Setup · \(service.name)"
+        let alert = Brand.alert()
+        alert.messageText = service.name
         let preset = 0
-        alert.informativeText = "Local endpoint:\n\(service.endpoint)\n\n\(producerInstructions(preset: preset, destination: service.destination))\n\nThe bearer credential was shown only when this connection was created. If it was lost, delete this pairing and create a new one, then update the producer. Pairing and local receipt stages do not activate or verify the producer."
+        let status = service.paused ? "Paused." : ((service.subscribers + service.directSubscribers) > 0 ? "Paired and listening." : "Paired on this Mac.")
+        let instructions = producerInstructions(preset:preset,destination:service.destination)
+        alert.informativeText = "\(status)\n\n\(instructions)\n\nLocal endpoint\n\(service.endpoint)"
         alert.addButton(withTitle: "Done")
         alert.addButton(withTitle: "Copy endpoint")
         alert.addButton(withTitle: "Copy setup guide")
+        alert.addButton(withTitle: "Choose icon…")
         let result = alert.runModal()
-        if result == .alertSecondButtonReturn {
+        if result.rawValue == NSApplication.ModalResponse.alertFirstButtonReturn.rawValue + 3 {
+            do { try Brand.chooseIcon(for:service) } catch { showError("Could not set service icon",error.localizedDescription) }
+        } else if result == .alertSecondButtonReturn {
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(service.endpoint, forType: .string)
         } else if result == .alertThirdButtonReturn {
@@ -251,60 +225,11 @@ final class MenuController: NSObject, NSApplicationDelegate {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString("Keep one standing subscription to app.message.created, channel d-bond, with my existing Dot Bridge Transport. Deliver events individually and immediately. Renew automatically if supported and keep it active until I disconnect. Acknowledge each request first and reply through the bridge. Pairing establishes two-way communication for every connected service. Use the D-Bond recipient address for an addressed message and the return address for a question to its sender. Keep payloads out of ordinary chat. Do not use Slack or unsubscribe after answering.",forType:.string)
     }
-    @objc private func copyDotAddress(_ sender:NSMenuItem) {
-        guard let id=sender.representedObject as? String,
-              let connection=hub?.snapshot().services.first(where: { $0.id == id }) else { return }
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(connection.name + "\nUse send_to_app on channel d-bond. Set metadata.recipient_caller_id to d-bond and metadata.recipient_conversation_id to "+id+". Use a stable idempotency_key for this question.",forType:.string)
-    }
-
-    @objc private func copyExample() {
-        guard let first = hub?.snapshot().services.first else {
-            showError("No service connected", "Connect a webhook service first.")
-            return
-        }
-        let pairing = first
-        let body = pairing.herald
-            ? "{\"id\":\"banner-1\",\"payload\":{\"title\":\"Render complete\",\"body\":\"Your render finished successfully.\"}}"
-            : "{\"id\":\"sample-1\",\"payload\":{\"text\":\"Hello\"}}"
-        let example = "curl -X POST '<service-endpoint>' -H 'Content-Type: application/json' -H 'Authorization: Bearer <service-credential>' -d '\(body)'\n\nGET '<service-endpoint>/stream?after=0' for receipts. Replace placeholders locally. Service: \(pairing.name)."
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(example, forType: .string)
-        showError("HTTP example copied", "The example uses placeholders so it does not expose the service credential. Destination: \(pairing.destination).")
-    }
-
-    @objc private func removePairing(_ sender: NSMenuItem) {
-        guard let id = sender.representedObject as? String, let hub else { return }
-        let alert = NSAlert()
-        alert.messageText = "Remove this service connection?"
-        alert.informativeText = "This revokes the local bearer credential and deletes queued events and receipts. A delivery already dispatching may still finish."
-        alert.addButton(withTitle: "Remove")
-        alert.addButton(withTitle: "Cancel")
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-        do { try hub.remove(id: id); refreshMenu() }
-        catch { showError("Could not remove pairing", error.localizedDescription) }
-    }
-
-    @objc private func togglePairing(_ sender: NSMenuItem) {
-        guard let id = sender.representedObject as? String, let hub,
-              let service = hub.snapshot().services.first(where: { $0.id == id }) else { return }
-        do { try hub.setPaused(id: id, paused: !service.paused); refreshMenu() }
-        catch { showError("Could not update service connection", error.localizedDescription) }
-    }
-
     @objc private func checkBridgeStatus() {
         guard let hub else { return }
         DispatchQueue.global(qos: .utility).async { [weak self, hub] in
-            let value = hub.bridgeStatus() + "\n\n" + hub.dotLinkStatus()
+            let value = hub.bridgeStatus()
             DispatchQueue.main.async { self?.showError("Bridge status", value) }
-        }
-    }
-
-    @objc private func checkHeraldStatus() {
-        guard let hub else { return }
-        DispatchQueue.global(qos: .utility).async { [weak self, hub] in
-            let value = hub.heraldStatus()
-            DispatchQueue.main.async { self?.showError("Herald status", value) }
         }
     }
 
@@ -322,37 +247,10 @@ final class MenuController: NSObject, NSApplicationDelegate {
     }
 
     private func showError(_ title: String, _ body: String) {
-        let alert = NSAlert()
+        let alert = Brand.alert()
         alert.messageText = title
         alert.informativeText = body
         alert.runModal()
-    }
-
-    private func friendlyState(_ state: String, herald: Bool) -> String {
-        if herald {
-            switch state {
-            case "herald_accepted": return " · Herald accepted (display unverified)"
-            case "herald_unconfirmed": return " · Herald outcome unconfirmed; check History"
-            case "sending_banner": return " · sending to Herald"
-            default: return " · \(state)"
-            }
-        }
-        switch state {
-        case "dot_acknowledged": return " · Dot started"
-        case "dot_replied": return " · Dot replied"
-        case "dot_waiting_for_link": return " · stored, waiting for Dot link"
-        case "dot_stored": return " · stored, awaiting Dot"
-        case "dot_push": return " · message from Dot"
-        case "dot_unconfirmed": return " · transport unavailable; retrying"
-        case "dot_quarantined": return " · delivery held; inspect receipt"
-        case "dot_route_blocked": return " · routing blocked"
-        case "local_reply": return " · local demo receipt"
-        case "queued": return " · received locally"
-        case "dispatching": return " · local adapter dispatching"
-        case "outcome_unknown": return " · dispatch outcome unknown; check destination"
-        case "adapter_failed": return " · demo adapter failed"
-        default: return " · \(state)"
-        }
     }
 
     private func disabled(_ title: String) -> NSMenuItem {
