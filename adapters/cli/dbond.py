@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import fcntl
 import getpass
+import hashlib
+import io
 import json
 import os
 import re
+import select
 import socket
 import stat
 import subprocess
@@ -226,11 +230,12 @@ def _request(pairing: dict, method: str, endpoint: str, body: dict | None = None
 
 
 class Stream:
-    def __init__(self, pairing: dict, cursor: int):
+    def __init__(self, pairing: dict, cursor: int, *, stream_suffix: str = "/stream", sequence_key: str = "sequence"):
+        self.sequence_key = sequence_key
         parsed = urllib.parse.urlsplit(pairing["endpoint"])
         self.sock = socket.create_connection((parsed.hostname, parsed.port or 80), timeout=10)
         self.reader = self.sock.makefile("rb")
-        path = parsed.path + "/stream?after=" + str(cursor)
+        path = parsed.path + stream_suffix + "?after=" + str(cursor)
         request = (f"GET {path} HTTP/1.1\r\nHost: {parsed.hostname}:{parsed.port or 80}\r\n"
                    f"Authorization: Bearer {pairing['secret']}\r\nAccept: text/event-stream\r\n"
                    "Connection: keep-alive\r\n\r\n")
@@ -276,7 +281,7 @@ class Stream:
                 try:
                     event = json.loads(fields["data"])
                     sequence = int(fields["id"])
-                    if event.get("sequence") != sequence:
+                    if event.get(self.sequence_key) != sequence:
                         fail("D-Bond stream sequence mismatch.")
                     return event
                 except (ValueError, KeyError, TypeError):
@@ -653,24 +658,322 @@ def _direct_target(pairing: dict, value: str) -> str:
     return matches[0]["id"]
 
 
+def direct_delivery_status(pairing: dict, message_id: str, sequence: int, *, wait_ms: int = 0) -> dict:
+    """Wait on authenticated receipt metadata, never on a conversational answer."""
+    if (not isinstance(message_id, str) or not EVENT_RE.fullmatch(message_id)
+            or type(sequence) is not int or sequence < 1
+            or type(wait_ms) is not int or not 0 <= wait_ms <= 60000):
+        raise ValueError("Invalid direct delivery status query")
+    query = urllib.parse.urlencode({"id": message_id, "sequence": sequence,
+                                    "condition": "acknowledged", "timeout_ms": wait_ms})
+    code, result = _request(pairing, "GET", _direct_url(pairing) + "/status?" + query,
+                            timeout=wait_ms / 1000 + 2)
+    if (code != 200 or result.get("id") != message_id or result.get("sequence") != sequence
+            or result.get("state") not in ("pending", "received", "acknowledged", "unconfirmed")
+            or type(result.get("satisfied")) is not bool):
+        raise ValueError("Invalid direct delivery status")
+    return result
+
+
+def direct_delivery_summary(pairing: dict, message_id: str, sequence: int, *, wait_ms: int = 0) -> dict:
+    value = direct_delivery_status(pairing, message_id, sequence, wait_ms=wait_ms)
+    return {**{key: value[key] for key in ("id", "to", "sequence", "basis", "adapter") if key in value},
+            "state": "queued" if value["state"] == "pending" else value["state"]}
+
+
+def direct_send_message(pairing: dict, to: str, text: str, *, message_id: str | None = None,
+                        in_reply_to: str | None = None, wait_ms: int = 10000) -> dict:
+    target = _direct_target(pairing, to)
+    message_id = message_id or str(uuid.uuid4())
+    if not EVENT_RE.fullmatch(message_id) or message_id.startswith("@dot:"):
+        raise ValueError("Direct message ID is invalid or reserved")
+    if type(wait_ms) is not int or not 0 <= wait_ms <= 60000:
+        raise ValueError("wait_ms must be from 0 to 60000")
+    body = {"id": message_id, "to": target, "text": text}
+    if in_reply_to is not None:
+        body["in_reply_to"] = in_reply_to
+    try:
+        code, stored = _request(pairing, "POST", _direct_url(pairing), body)
+    except (OSError, ValueError, SystemExit) as exc:
+        raise ValueError(f"Direct message {message_id} is unconfirmed; reconcile delivery and retry only with this same ID") from exc
+    if (code not in (200, 202) or stored.get("id") != message_id
+            or type(stored.get("sequence")) is not int or stored["sequence"] < 1):
+        raise ValueError("Invalid direct-message storage receipt")
+    result = {"id": message_id, "to": target, "sequence": stored["sequence"],
+              "duplicate": stored.get("duplicate", False), "state": "queued"}
+    try:
+        # One bounded condition wait; an offline recipient leaves the durable
+        # message queued. Retry uses the same ID and cannot create another send.
+        with contextlib.redirect_stderr(io.StringIO()):
+            delivery = direct_delivery_status(pairing, message_id, stored["sequence"], wait_ms=wait_ms)
+        if delivery["satisfied"] and delivery["state"] == "acknowledged":
+            result["state"] = "acknowledged"
+        elif delivery["state"] == "received":
+            result["state"] = "received"
+        elif delivery["state"] == "unconfirmed":
+            result["state"] = "unconfirmed"
+        for key in ("basis", "adapter"):
+            if key in delivery:
+                result[key] = delivery[key]
+    except (OSError, ValueError, SystemExit):
+        result["delivery_status"] = "unconfirmed"
+    return result
+
+
+_RECEIPT_IN_FLIGHT_LOCK = threading.Lock()
+_RECEIPT_IN_FLIGHT: dict[Path, int] = {}
+
+
+def direct_delivery_receipt(pairing: dict, event: dict, *, adapter: str,
+                            state: str = "received", basis: str = "host_acceptance") -> dict:
+    """Durably queue metadata only, then authenticate as the exact recipient.
+
+    Pipe/notification writes are received/host_acceptance. Only a proven host
+    submission or a model-facing receipt call may acknowledge the delivery.
+    """
+    sender = event.get("from", event.get("sender_id"))
+    source = event.get("id", event.get("source_id"))
+    sequence = event.get("sequence")
+    own_id = pairing["endpoint"].split("/services/", 1)[1].split("/", 1)[0]
+    if (not isinstance(sender, str) or (sender != "owner" and not SESSION_ID_RE.fullmatch(sender))
+            or not valid_direct_source(source, sender) or type(sequence) is not int or sequence < 1
+            or ("to" in event and event["to"] != own_id)
+            or state not in ("received", "acknowledged", "unconfirmed")
+            or basis not in ("host_acceptance", "participant", "host_result_unknown")
+            or (state == "received" and basis != "host_acceptance")
+            or ((state == "unconfirmed") != (basis == "host_result_unknown"))
+            or not isinstance(adapter, str) or not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", adapter)):
+        raise ValueError("Invalid direct delivery receipt")
+    body = {"from": sender, "id": source, "sequence": sequence, "state": state,
+            "adapter": adapter, "basis": basis}
+    queued = {"endpoint": pairing["endpoint"], "body": body}
+    digest = hashlib.sha256(json.dumps(queued, sort_keys=True).encode()).hexdigest()
+    path = _safe_dir(create=True) / (".receipt-" + digest + ".json")
+    # The directory watcher can see the durable outbox before this first POST
+    # finishes. Leave that in-flight attempt alone; its failure signals retry.
+    with _RECEIPT_IN_FLIGHT_LOCK:
+        _RECEIPT_IN_FLIGHT[path] = _RECEIPT_IN_FLIGHT.get(path, 0) + 1
+    try:
+        _atomic_json(path, queued)
+        result = _deliver_direct_receipt(pairing, path, body)
+    finally:
+        with _RECEIPT_IN_FLIGHT_LOCK:
+            if _RECEIPT_IN_FLIGHT[path] == 1:
+                del _RECEIPT_IN_FLIGHT[path]
+            else:
+                _RECEIPT_IN_FLIGHT[path] -= 1
+    if result["state"] == "receipt_queued":
+        _signal_receipt_retry(pairing)
+    return result
+
+
+def _deliver_direct_receipt(pairing: dict, path: Path, body: dict) -> dict:
+    try:
+        with contextlib.redirect_stderr(io.StringIO()):
+            code, result = _request(pairing, "POST", _direct_url(pairing) + "/receipt", body, timeout=2)
+        if (code != 200 or not isinstance(result.get("receipt"), dict)
+                or any(result["receipt"].get(key) != value for key, value in body.items())):
+            raise ValueError("Invalid direct delivery receipt response")
+        path.unlink(missing_ok=True)
+        return {"state": body["state"], "basis": body["basis"], "duplicate": result.get("duplicate", False)}
+    except (OSError, ValueError, SystemExit):
+        return {"state": "receipt_queued", "basis": body["basis"]}
+
+
+def retry_direct_receipts(pairing: dict) -> int:
+    """Replay an owner-only outbox without repeating the message or its host push."""
+    pending = 0
+    for path in _safe_dir(create=True).glob(".receipt-*.json"):
+        try:
+            with _RECEIPT_IN_FLIGHT_LOCK:
+                if path in _RECEIPT_IN_FLIGHT:
+                    continue
+            fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            with os.fdopen(fd, "r", encoding="utf-8") as source:
+                info = os.fstat(source.fileno())
+                if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+                    continue
+                value = json.load(source)
+            if value.get("endpoint") == pairing["endpoint"] and isinstance(value.get("body"), dict):
+                if _deliver_direct_receipt(pairing, path, value["body"])["state"] == "receipt_queued":
+                    pending += 1
+        except (OSError, ValueError, TypeError):
+            continue
+    return pending
+
+
+_RECEIPT_WAKES_LOCK = threading.Lock()
+_RECEIPT_WAKES: dict[str, list] = {}
+
+
+def _signal_receipt_retry(pairing: dict) -> None:
+    with _RECEIPT_WAKES_LOCK:
+        for wake in _RECEIPT_WAKES.get(pairing["endpoint"], ()):
+            wake.notify()
+
+
+class _ReceiptRetryWake:
+    """One exact binding's idle notification, with cross-process macOS recovery."""
+
+    def __init__(self, pairing: dict, stop: threading.Event):
+        self.endpoint = pairing["endpoint"]
+        self.event = threading.Event()
+        self.lock = threading.Lock()
+        self.closed = False
+        self.kqueue = None
+        self.read_fd = self.write_fd = self.directory_fd = None
+        if sys.platform == "darwin" and hasattr(select, "kqueue"):
+            self.read_fd, self.write_fd = os.pipe()
+            os.set_blocking(self.read_fd, False)
+            os.set_blocking(self.write_fd, False)
+            self.directory_fd = os.open(_safe_dir(create=True), os.O_RDONLY)
+            self.kqueue = select.kqueue()
+            self.kqueue.control([
+                select.kevent(self.read_fd, filter=select.KQ_FILTER_READ,
+                              flags=select.KQ_EV_ADD | select.KQ_EV_CLEAR),
+                select.kevent(self.directory_fd, filter=select.KQ_FILTER_VNODE,
+                              flags=select.KQ_EV_ADD | select.KQ_EV_CLEAR,
+                              fflags=select.KQ_NOTE_WRITE | select.KQ_NOTE_EXTEND | select.KQ_NOTE_ATTRIB
+                              | select.KQ_NOTE_RENAME | select.KQ_NOTE_DELETE),
+            ], 0, 0)
+        with _RECEIPT_WAKES_LOCK:
+            _RECEIPT_WAKES.setdefault(self.endpoint, []).append(self)
+
+        def shutdown_wake():
+            stop.wait()
+            self.notify()
+
+        threading.Thread(target=shutdown_wake, daemon=True).start()
+
+    def notify(self) -> None:
+        with self.lock:
+            if self.closed:
+                return
+            self.event.set()
+            if self.write_fd is not None:
+                try:
+                    os.write(self.write_fd, b"\0")
+                except (OSError, BlockingIOError):
+                    pass
+
+    def wait(self, timeout: float | None) -> None:
+        if self.kqueue is None:
+            self.event.wait(timeout)
+        else:
+            self.kqueue.control([], 8, timeout)
+            try:
+                while os.read(self.read_fd, 4096):
+                    pass
+            except BlockingIOError:
+                pass
+        self.event.clear()
+
+    def close(self) -> None:
+        with _RECEIPT_WAKES_LOCK:
+            registered = _RECEIPT_WAKES.get(self.endpoint, [])
+            if self in registered:
+                registered.remove(self)
+            if not registered:
+                _RECEIPT_WAKES.pop(self.endpoint, None)
+        with self.lock:
+            self.closed = True
+            if self.kqueue is not None:
+                self.kqueue.close()
+            for fd in (self.read_fd, self.write_fd, self.directory_fd):
+                if fd is not None:
+                    os.close(fd)
+
+
+def receipt_retry_loop(pairing: dict, stop: threading.Event) -> None:
+    # Register first, then scan once: an outbox item created concurrently cannot
+    # fall into a gap between startup recovery and the indefinite idle wait.
+    wake = _ReceiptRetryWake(pairing, stop)
+    delay = 1.0
+    try:
+        while not stop.is_set():
+            pending = retry_direct_receipts(pairing)
+            if stop.is_set():
+                break
+            wake.wait(delay if pending else None)
+            delay = min(30.0, delay * 2) if pending else 1.0
+    finally:
+        wake.close()
+
+
 def command_direct_peers(args) -> None:
     print(json.dumps(_direct_peers(_read_pairing(args.alias)), ensure_ascii=False))
 
 
 def command_direct_send(args) -> None:
     pairing = _read_pairing(args.alias)
-    target = _direct_target(pairing, args.to)
-    message_id = args.message_id or str(uuid.uuid4())
-    if not EVENT_RE.fullmatch(message_id) or message_id.startswith("@dot:"):
-        fail("Direct message ID is invalid or reserved.")
-    body = {"id": message_id, "to": target, "text": args.text}
-    if getattr(args, "in_reply_to", None):
-        body["in_reply_to"] = args.in_reply_to
-    status, receipt = _request(pairing, "POST", _direct_url(pairing), body)
-    if status not in (200, 202) or receipt.get("id") != message_id:
-        fail("D-Bond returned an invalid direct-message receipt.")
-    print(json.dumps({"id": message_id, "to": target, "sequence": receipt.get("sequence"),
-                      "duplicate": receipt.get("duplicate"), "state": "broker_recorded"}, ensure_ascii=False))
+    try:
+        result = direct_send_message(pairing, args.to, args.text, message_id=args.message_id,
+                                     in_reply_to=getattr(args, "in_reply_to", None),
+                                     wait_ms=getattr(args, "wait_ms", 10000))
+    except ValueError as exc:
+        fail(str(exc))
+    print(json.dumps(result, ensure_ascii=False))
+
+
+def command_direct_ack(args) -> None:
+    result = direct_delivery_receipt(_read_pairing(args.alias),
+                                    {"from": args.sender_id, "id": args.source_id, "sequence": args.sequence},
+                                    adapter="cli-agent", state="acknowledged", basis="participant")
+    print(json.dumps(result, ensure_ascii=False))
+
+
+def command_direct_status(args) -> None:
+    print(json.dumps(direct_delivery_summary(_read_pairing(args.alias), args.message_id,
+                                           args.sequence, wait_ms=args.wait_ms), ensure_ascii=False))
+
+
+def direct_receipts(pairing: dict, after: int = 0):
+    """Yield sender-scoped metadata only; consumers must not inject it into chat."""
+    if type(after) is not int or after < 0:
+        raise ValueError("after must be a nonnegative receipt sequence")
+    own_id = pairing["endpoint"].split("/services/", 1)[1].split("/", 1)[0]
+    stream = Stream({**pairing, "endpoint": _direct_url(pairing)}, after,
+                    stream_suffix="/receipts-stream", sequence_key="receipt_sequence")
+    try:
+        while True:
+            row = stream.next_event()
+            if row is None:
+                return
+            if (not isinstance(row, dict) or set(row) != {"id", "from", "to", "sequence", "receipt_sequence",
+                                                          "state", "adapter", "basis", "recorded_at"}
+                    or row["from"] != own_id or not isinstance(row["to"], str)
+                    or not SESSION_ID_RE.fullmatch(row["to"])
+                    or not isinstance(row["id"], str) or not EVENT_RE.fullmatch(row["id"])
+                    or type(row["sequence"]) is not int or row["sequence"] < 1
+                    or type(row["receipt_sequence"]) is not int or row["receipt_sequence"] < 1
+                    or row["state"] not in ("received", "acknowledged", "unconfirmed")
+                    or row["basis"] not in ("host_acceptance", "participant", "connection_reply", "host_result_unknown")
+                    or not isinstance(row["adapter"], str) or not isinstance(row["recorded_at"], str)):
+                raise ValueError("Invalid sender delivery receipt metadata")
+            if row["receipt_sequence"] > after:
+                after = row["receipt_sequence"]
+                yield row
+    finally:
+        stream.close()
+
+
+def command_direct_receipts(args) -> None:
+    pairing = _read_pairing(args.alias)
+    cursor = args.after
+    delay = 0.5
+    try:
+        while True:
+            try:
+                for row in direct_receipts(pairing, cursor):
+                    print(json.dumps(row, ensure_ascii=False, separators=(",", ":")), flush=True)
+                    cursor = row["receipt_sequence"]
+                    delay = 0.5
+            except (OSError, ConnectionError):
+                pass
+            time.sleep(delay)
+            delay = min(20.0, delay * 2)
+    except KeyboardInterrupt:
+        return
 
 
 def command_dot_inbox(args) -> None:
@@ -707,14 +1010,18 @@ def command_direct_inbox(args) -> None:
     if status != 200 or not isinstance(body.get("messages"), list):
         fail("D-Bond returned an invalid direct inbox.")
     rows = body["messages"]
+    print(json.dumps({"messages": rows, "after": after}, ensure_ascii=False), flush=True)
+    for event in rows:
+        direct_delivery_receipt(pairing, event, adapter="cli-inbox")
     if args.advance and rows:
         pairing["direct_cursor"] = max(row["sequence"] for row in rows)
         _save(args.alias, pairing)
-    print(json.dumps({"messages": rows, "after": after}, ensure_ascii=False))
 
 
 def command_direct_listen(args) -> None:
     pairing = _read_pairing(args.alias)
+    stop = threading.Event()
+    threading.Thread(target=receipt_retry_loop, args=(pairing, stop), daemon=True).start()
     cursor = pairing.get("direct_cursor", 0)
     delay = 0.5
     try:
@@ -727,6 +1034,7 @@ def command_direct_listen(args) -> None:
                     if event is None:
                         raise ConnectionError("Direct stream closed.")
                     print(json.dumps(event, ensure_ascii=False), flush=True)
+                    direct_delivery_receipt(pairing, event, adapter="cli-listener")
                     cursor = pairing["direct_cursor"] = event["sequence"]
                     _save(args.alias, pairing)
                     delay = 0.5
@@ -738,6 +1046,8 @@ def command_direct_listen(args) -> None:
                     stream.close()
     except KeyboardInterrupt:
         return
+    finally:
+        stop.set()
 
 
 def session_listener_guidance(alias: str, *, direct_only: bool = False) -> dict:
@@ -885,6 +1195,7 @@ def _session_lane(alias: str, direct: bool, emit, stop: threading.Event, errors:
                     except OSError as exc:
                         raise ValueError("Session output closed") from exc
                     if direct:
+                        direct_delivery_receipt(pairing, event, adapter="cli-monitor")
                         cursor = pairing[key] = event["sequence"]
                     else:
                         pushes = pairing.setdefault("pushes", [])
@@ -908,6 +1219,7 @@ def command_session_listen(args) -> None:
     pairing = _read_pairing(args.alias)
     direct_only = pairing.get("destination") == "peer"
     stop = threading.Event()
+    threading.Thread(target=receipt_retry_loop, args=(pairing, stop), daemon=True).start()
     errors: list[str] = []
     output_lock = threading.Lock()
 
@@ -1144,11 +1456,22 @@ def parser() -> argparse.ArgumentParser:
     direct_send = sub.add_parser("direct-send", help="send directly to another paired service without Dot")
     direct_send.add_argument("alias"); direct_send.add_argument("to", help="exact recipient ID or display name"); direct_send.add_argument("text")
     direct_send.add_argument("--message-id", help="stable ID for safe retry after an interrupted POST")
+    direct_send.add_argument("--wait-ms", type=int, default=10000, help="bounded automatic acknowledgment wait (default 10000; 0 for lookup only)")
     direct_send.set_defaults(run=command_direct_send)
     direct_answer = sub.add_parser("direct-answer", help="answer a direct message from the same paired sender")
     direct_answer.add_argument("alias"); direct_answer.add_argument("to", help="original sender ID"); direct_answer.add_argument("in_reply_to", help="original direct message ID"); direct_answer.add_argument("text")
     direct_answer.add_argument("--message-id", help="stable ID for safe retry after an interrupted POST")
-    direct_answer.set_defaults(run=lambda args: command_direct_send(type("DirectArgs", (), {"alias":args.alias,"to":args.to,"text":args.text,"in_reply_to":args.in_reply_to,"message_id":args.message_id})()))
+    direct_answer.add_argument("--wait-ms", type=int, default=10000)
+    direct_answer.set_defaults(run=command_direct_send)
+    direct_ack = sub.add_parser("direct-ack", help="silently acknowledge an exact direct message accessed by this participant")
+    direct_ack.add_argument("alias"); direct_ack.add_argument("sender_id"); direct_ack.add_argument("source_id")
+    direct_ack.add_argument("sequence", type=int); direct_ack.set_defaults(run=command_direct_ack)
+    direct_status = sub.add_parser("direct-status", help="read or briefly wait for authenticated peer delivery metadata")
+    direct_status.add_argument("alias"); direct_status.add_argument("message_id"); direct_status.add_argument("sequence", type=int)
+    direct_status.add_argument("--wait-ms", type=int, default=0); direct_status.set_defaults(run=command_direct_status)
+    direct_receipts_cmd = sub.add_parser("direct-receipts", help="subscribe to sender-only delivery metadata; never route this output into agent chat")
+    direct_receipts_cmd.add_argument("alias"); direct_receipts_cmd.add_argument("--after", type=int, default=0)
+    direct_receipts_cmd.set_defaults(run=command_direct_receipts)
     direct_inbox = sub.add_parser("direct-inbox", help="read durable direct messages after a sequence")
     direct_inbox.add_argument("alias"); direct_inbox.add_argument("--after", type=int, default=None)
     direct_inbox.add_argument("--advance", action="store_true", help="advance the saved direct cursor")

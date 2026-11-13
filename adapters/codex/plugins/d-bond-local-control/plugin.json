@@ -1,15 +1,24 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "d-bond-local-control",
-  "version": "0.1.6",
+  "version": "0.1.8",
   "description": "Configure D-Bond and exchange paired direct or Dot messages through one local plugin.",
-  "author": {"name": "IVG"},
-  "extensions": {"com.openai": {"interface": {
-    "displayName": "D-Bond Local Control",
-    "shortDescription": "Configure and message through D-Bond",
-    "longDescription": "Inspect local connections and traces, edit owner rules with version checks, and use the same paired direct and Dot messaging backend. Registration is tied to an exact host chat; receipts distinguish stored messages from agent answers and verified wake checks.",
-    "developerName": "IVG", "category": "Productivity",
-    "capabilities": ["Interactive"],
-    "defaultPrompt": "Show my D-Bond connections, register this exact chat if requested, and help with paired messages or connection rules."
-  }}}
+  "author": {
+    "name": "IVG"
+  },
+  "extensions": {
+    "com.openai": {
+      "interface": {
+        "displayName": "D-Bond Local Control",
+        "shortDescription": "Configure and message through D-Bond",
+        "longDescription": "Inspect local connections and traces, edit owner rules with version checks, and use the same paired direct and Dot messaging backend. Registration is tied to an exact host chat; receipts distinguish stored messages from agent answers and verified wake checks.",
+        "developerName": "IVG",
+        "category": "Productivity",
+        "capabilities": [
+          "Interactive"
+        ],
+        "defaultPrompt": "Show my D-Bond connections, register this exact chat if requested, and help with paired messages or connection rules."
+      }
+    }
+  }
 }

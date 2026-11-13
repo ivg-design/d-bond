@@ -37,6 +37,33 @@ class DirectMCPTests(unittest.TestCase):
                 mcp.invoke("local_status", {"alias":"x"})
         check.assert_called_once_with()
 
+    def test_participant_read_acknowledges_after_response_but_preview_does_not(self):
+        pairing = {"endpoint": "http://127.0.0.1:1234/v1/services/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/events"}
+        event = {"from": "11111111-2222-3333-4444-555555555555", "id": "message-1", "sequence": 7}
+        for extra, expected in (({}, True), ({"consume": False}, False)):
+            order = []
+            frame = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+                "name": "receive_direct_messages", "arguments": {"alias": "test", **extra}}}
+            with patch.object(mcp.sys, "stdin", io.StringIO(json.dumps(frame) + "\n")), \
+                 patch.object(mcp.dbond, "_read_pairing", return_value=pairing), \
+                 patch.object(mcp.dbond, "_request", return_value=(200, {"messages": [event]})), \
+                 patch.object(mcp, "emit", side_effect=lambda _: order.append("response")), \
+                 patch.object(mcp.dbond, "direct_delivery_receipt", side_effect=lambda *a, **kw: order.append("ack")) as ack:
+                mcp.main()
+            self.assertEqual(order, ["response", "ack"] if expected else ["response"])
+            if expected:
+                ack.assert_called_once_with(pairing, event, adapter="mcp-read", state="acknowledged", basis="participant")
+
+    def test_delivery_status_reconciles_without_resend(self):
+        pair = {"endpoint": "fixture"}
+        result = {"id": "original", "sequence": 7, "state": "acknowledged", "basis": "participant"}
+        with patch.object(mcp.dbond, "_read_pairing", return_value=pair), \
+                patch.object(mcp.dbond, "direct_delivery_summary", return_value=result) as lookup, \
+                patch.object(mcp.dbond, "direct_send_message") as send:
+            self.assertEqual(mcp.invoke("direct_delivery_status", {"alias": "test", "message_id": "original", "sequence": 7}), result)
+            lookup.assert_called_once_with(pair, "original", 7, wait_ms=0)
+            send.assert_not_called()
+
     def test_acknowledge_wake_accepts_only_a_sequence(self):
         tool = next(t for t in mcp.TOOLS if t["name"] == "acknowledge_wake")
         self.assertEqual(tool["inputSchema"]["required"], ["alias", "sequence"])
@@ -184,8 +211,9 @@ class DirectMCPTests(unittest.TestCase):
              patch.object(mcp.dbond, "_direct_target", return_value="11111111-2222-3333-4444-555555555555"), \
              patch.object(mcp.dbond, "_request", return_value=(202,{"id":"fixed-id","sequence":7,"duplicate":False})) as request:
             sent = mcp.invoke("send_direct_message", {"alias":"test","to":"Codex","text":"Hi","message_id":"fixed-id"})
-            self.assertEqual(sent["state"], "broker_recorded")
-            self.assertTrue(request.call_args.args[2].endswith("/messages"))
+            self.assertEqual(sent["state"], "queued")
+            self.assertTrue(request.call_args_list[0].args[2].endswith("/messages"))
+            self.assertIn("/messages/status?", request.call_args_list[1].args[2])
         with patch.object(mcp.dbond, "command_ask", side_effect=lambda args: print(json.dumps({"state":"dot_replied","reply":"Hello"}))) as ask:
             result = mcp.invoke("ask_dot", {"alias":"test","text":"Hi","to":"Codex","message_id":"dot-id"})
             self.assertEqual(result["state"], "dot_replied")

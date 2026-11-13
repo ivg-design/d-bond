@@ -23,12 +23,24 @@ class MonitorFixture:
     def __init__(self):
         self.rows = {"dot": [], "direct": []}
         self.paths = []
+        self.receipts = []
         self.lock = threading.Lock()
         outer = self
 
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, *_):
                 pass
+
+            def do_POST(self):
+                assert self.path == f"/v1/services/{SERVICE}/messages/receipt"
+                assert self.headers.get("Authorization") == "Bearer c2VjcmV0"
+                row = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                with outer.lock:
+                    outer.receipts.append(row)
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"receipt": row, "duplicate": False}).encode())
 
             def do_GET(self):
                 assert self.headers.get("Authorization") == "Bearer c2VjcmV0"
@@ -82,6 +94,9 @@ class SessionListenTests(unittest.TestCase):
                 second = self._run_until(store, pair, wanted={"@dot:10", "agent-2"}, cursor=2)
                 self.assertEqual({row["source_id"] for row in second}, {"@dot:10", "agent-2"})
                 self.assertEqual(next(row for row in second if row["state"] == "direct_message")["in_reply_to"], "agent-1")
+                self.assertEqual([row["id"] for row in fixture.receipts], ["agent-1", "agent-2"])
+                self.assertTrue(all(row["state"] == "received" and row["basis"] == "host_acceptance"
+                                    and row["adapter"] == "cli-monitor" for row in fixture.receipts))
         finally:
             fixture.close()
 

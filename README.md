@@ -48,8 +48,9 @@ The [Claude adapter](adapters/claude/README.md) supports a local Desktop MCP
 extension and a Claude Code plugin with a session-start hook. A Claude Code
 channel requires preview opt-in in an open session. The
 [Codex Desktop listener](adapters/codex-session/README.md) is a separate,
-opt-in per-chat adapter; it uses the host's bundled CLI to queue an event
-pointer for that exact chat. A broker receipt or queued pointer does not prove
+opt-in per-chat adapter. It delivers the sender, original text and reply
+reference through the discovered Desktop owner, steering an active turn or
+requesting a turn for an idle, open chat. Host acceptance, recipient readback
 is an isolated Chrome client, not an installed
 reads and edits owner SOP rules and event traces through the app's private
 same-user socket; its direct tools can send and read authenticated messages.

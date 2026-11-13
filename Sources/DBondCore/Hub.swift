@@ -59,7 +59,7 @@ struct Receipt: Codable, Equatable {
         return result
     }
 }
-struct Ledger: Codable { var services:[Service] = []; var events:[Event] = []; var receipts:[Receipt]?; var seq = 0 }
+struct Ledger: Codable { var services:[Service] = []; var events:[Event] = []; var receipts:[Receipt]?; var directReceipts:[DirectReceipt]? = nil; var seq = 0 }
 public typealias Handler = (String,String,Data) throws -> String
 public typealias DotSender = (String,String,Data,@escaping (String,String)->Void) throws -> (state:String,reply:String)
 
@@ -462,7 +462,7 @@ public final class Hub: @unchecked Sendable {
                             ? (event.state == "wake_verified" ? "Authenticated connection acknowledged wake check; AI turn not independently proven" :
                                event.state == "wake_scheduled" ? "Registration check scheduled" :
                                event.state == "wake_superseded" ? "A later wake check replaced this one" : "Wake check stored for recipient; acknowledgement pending")
-                            : direction == "local" ? nil : "Stored by D-Bond for recipient; agent read unconfirmed.",
+                            : direction == "local" ? nil : directDeliveryMeaning(event),
                           inReplyTo:replyTo,brokerSequence:direction == "local" ? nil : event.sequence,preview:preview,wakeCheck:isWake,
                           dotReplyPreview:dotReplyPreview,dotReplyAt:finalReply == nil ? nil : dotReplyAt)
     }
@@ -564,7 +564,7 @@ public final class Hub: @unchecked Sendable {
     public func remove(id:String) throws {
         lock.lock(); defer { lock.unlock() }
         guard ledger.services.contains(where: { $0.id == id }) else { throw Fault.message("Service connection no longer exists.") }
-        var next = ledger; next.services.removeAll { $0.id == id }; next.events.removeAll { $0.service == id || $0.route == "peer:" + id }; next.receipts?.removeAll { $0.service == id }
+        var next = ledger; next.services.removeAll { $0.id == id }; next.events.removeAll { $0.service == id || $0.route == "peer:" + id }; next.receipts?.removeAll { $0.service == id }; next.directReceipts?.removeAll { $0.from == id || $0.to == id }
         try persist(next); lock.broadcast()
     }
     /// An explicit retry keeps the original immutable service/event key and payload.
@@ -592,7 +592,7 @@ public final class Hub: @unchecked Sendable {
             let allowed = ledger.services.contains(where: { $0.id == id && $0.chromeOrigin == origin })
             lock.unlock()
             guard allowed else { return HTTPReply(403,["error":"Origin is not allowed for this service connection."]) }
-            if r.method == "OPTIONS", (p.count == 4 || (p.count == 5 && p[4] == "stream")) { return HTTPReply(200,[:]) }
+            if r.method == "OPTIONS", (p.count == 4 || (p.count == 5 && (p[4] == "stream" || (p[3] == "messages" && ["receipt","status","receipts-stream"].contains(p[4]))))) { return HTTPReply(200,[:]) }
         }
         guard let auth = r.headers["authorization"], auth.hasPrefix("Bearer ") else { return HTTPReply(401,[:]) }
         let digest = Self.digest(Data(auth.dropFirst(7).utf8))
@@ -670,6 +670,16 @@ public final class Hub: @unchecked Sendable {
         let sender = ledger.services[senderIndex]
         guard ["dot","peer"].contains(sender.destination ?? "") else { return HTTPReply(403,["error":"This connection cannot send direct messages."]) }
         guard sender.paused != true else { return HTTPReply(423,["error":"Service connection is paused."]) }
+        if parts.count == 5 && parts[4] == "receipts-stream" {
+            let query=url.queryItems ?? []
+            guard r.method == "GET", query.count <= 1,
+                  query.allSatisfy({ $0.name == "after" && $0.value != nil }),
+                  let after=Int(query.first?.value ?? "0"), after >= 0 else { return HTTPReply(422,["error":"Supply an optional nonnegative receipt cursor after."]) }
+            guard r.headers["accept"]?.contains("text/event-stream") == true else { return HTTPReply(406,["error":"Receipt stream requires text/event-stream."]) }
+            return HTTPReply(200,stream: { [weak self] write in self?.directReceiptStream(sender:sender,after:after,write:write) })
+        }
+        if parts.count == 5 && parts[4] == "receipt" { return directReceiptRoute(r, url:url, recipient:sender) }
+        if parts.count == 5 && parts[4] == "status" { return directStatusRoute(r, url:url, sender:sender) }
         if parts.count == 5 && parts[4] == "wake-ack" {
             guard r.method == "POST", url.query == nil,
                   r.headers["content-type"]?.components(separatedBy:";").first?.lowercased() == "application/json",
@@ -746,10 +756,138 @@ public final class Hub: @unchecked Sendable {
                           payloadDigest:Self.digest(payload),route:"peer:" + target)
         event = Self.marked(event,"peer_delivered",basis:"broker_recorded")
         next.events.append(event)
+        if let replyID=body["in_reply_to"] as? String,
+           let original=next.events.firstIndex(where: { $0.id == replyID && $0.service == target && $0.route == "peer:" + sender.id }),
+           let originalSequence=next.events[original].sequence {
+            let rows=(next.directReceipts ?? []).filter { $0.from == target && $0.id == replyID && $0.sequence == originalSequence && $0.to == sender.id }
+            if !rows.contains(where: { $0.state == "acknowledged" && $0.basis == "connection_reply" }) {
+                next.seq += 1
+                next.directReceipts=(next.directReceipts ?? []) + [DirectReceipt(from:target,to:sender.id,id:replyID,sequence:originalSequence,receiptSequence:next.seq,state:"acknowledged",adapter:"direct_reply",basis:"connection_reply",recordedAt:Self.now())]
+                if rows.map(\.rank).max() ?? 0 < 3 {
+                    next.events[original]=Self.marked(next.events[original],"peer_acknowledged",basis:"connection_reply")
+                }
+            }
+        }
         next.services[senderIndex].seen = Self.now()
         next.services[senderIndex].state = "peer_delivered"
         do { try persist(next); lock.broadcast() } catch { return HTTPReply(507,["error":"Could not persist direct message."]) }
-        return HTTPReply(202,["id":messageID,"sequence":next.seq,"duplicate":false])
+        return HTTPReply(202,["id":messageID,"sequence":event.sequence ?? 0,"duplicate":false])
+    }
+    /// All direct receipt/status operations run under the same condition as message delivery.
+    /// Receipts are metadata: never enter the inbound message queue or move its cursor.
+    private func directReceiptRoute(_ r:Request, url:URLComponents, recipient:Service) -> HTTPReply {
+        guard r.method == "POST", url.query == nil,
+              r.headers["content-type"]?.components(separatedBy:";").first?.lowercased() == "application/json",
+              let body=(try? JSONSerialization.jsonObject(with:r.body)) as? [String:Any],
+              Set(body.keys).isSubset(of:["from","id","sequence","state","adapter","basis"]),
+              let from=body["from"] as? String, let id=body["id"] as? String,
+              let number=body["sequence"] as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
+              let sequence=number as? Int, sequence > 0, number.doubleValue == Double(sequence),
+              let state=body["state"] as? String, ["received","acknowledged","unconfirmed"].contains(state),
+              let adapter=body["adapter"] as? String, !adapter.isEmpty, adapter.utf8.count <= 120,
+              !adapter.unicodeScalars.contains(where:CharacterSet.controlCharacters.contains),
+              body["basis"] == nil || body["basis"] is String else {
+            return HTTPReply(422,["error":"Expected {from,id,sequence,state:received|acknowledged|unconfirmed,adapter,basis?:host_acceptance|participant|host_result_unknown}."])
+        }
+        let basis=body["basis"] as? String ?? "host_acceptance"
+        guard (state == "unconfirmed" && basis == "host_result_unknown") ||
+              (state == "received" && basis == "host_acceptance") ||
+              (state == "acknowledged" && ["host_acceptance","participant"].contains(basis)) else {
+            return HTTPReply(422,["error":"Receipt basis must match the actual host acceptance or participant observation."])
+        }
+        guard let index=ledger.events.firstIndex(where: { $0.service == from && $0.id == id && $0.sequence == sequence && $0.route == "peer:" + recipient.id }),
+              !id.hasPrefix("@wake:") else { return HTTPReply(404,["error":"Original direct message tuple was not found for this recipient."]) }
+        if let old=(ledger.directReceipts ?? []).first(where: { $0.from == from && $0.id == id && $0.sequence == sequence && $0.to == recipient.id && $0.state == state && $0.adapter == adapter && $0.basis == basis }) {
+            return HTTPReply(200,["duplicate":true,"receipt":old.wire,"status":directStatus(ledger.events[index],condition:"acknowledged")])
+        }
+        var next=ledger; next.seq += 1
+        let receipt=DirectReceipt(from:from,to:recipient.id,id:id,sequence:sequence,receiptSequence:next.seq,state:state,adapter:adapter,basis:basis,recordedAt:Self.now())
+        next.directReceipts=(next.directReceipts ?? []) + [receipt]
+        // State records strongest evidence; every distinct adapter observation remains in metadata.
+        let oldRows=(ledger.directReceipts ?? []).filter { $0.from == from && $0.id == id && $0.sequence == sequence }
+        if oldRows.map(\.rank).max() ?? -1 < receipt.rank {
+            next.events[index]=Self.marked(next.events[index],state == "acknowledged" ? "peer_acknowledged" : state == "received" ? "peer_received" : "peer_unconfirmed",basis:basis == "participant" ? "participant_reported" : basis == "host_result_unknown" ? "host_result_unknown" : "host_accepted")
+        }
+        do { try persist(next); lock.broadcast() } catch { return HTTPReply(507,["error":"Could not persist direct receipt."]) }
+        return HTTPReply(200,["duplicate":false,"receipt":receipt.wire,"status":directStatus(ledger.events[index],condition:"acknowledged")])
+    }
+    private func directStatus(_ event:Event, condition:String) -> [String:Any] {
+        let target=String((event.route ?? "peer:").dropFirst(5))
+        let rows=(ledger.directReceipts ?? []).filter { $0.from == event.service && $0.id == event.id && $0.sequence == event.sequence && $0.to == target }
+        let strongest=rows.max { $0.rank < $1.rank }
+        let state=strongest?.state ?? "pending"
+        var result:[String:Any] = ["id":event.id,"from":event.service,"to":target,"sequence":event.sequence ?? 0,
+            "state":state,"condition":condition,"satisfied":state == "acknowledged" || state == condition,
+            "receipts":rows.sorted { $0.receiptSequence < $1.receiptSequence }.map { $0.wire }]
+        if let strongest {
+            result["basis"]=strongest.basis; result["adapter"]=strongest.adapter; result["recorded_at"]=strongest.recordedAt
+        }
+        return result
+    }
+    private func directStatusRoute(_ r:Request, url:URLComponents, sender:Service) -> HTTPReply {
+        let query=url.queryItems ?? []
+        let keys=query.map(\.name)
+        guard r.method == "GET", Set(keys).count == keys.count,
+              Set(keys).isSubset(of:["id","sequence","condition","timeout_ms"]),
+              let id=query.first(where: { $0.name == "id" })?.value,
+              let raw=query.first(where: { $0.name == "sequence" })?.value, let sequence=Int(raw), sequence > 0,
+              let timeout=Int(query.first(where: { $0.name == "timeout_ms" })?.value ?? "0"), (0...60000).contains(timeout) else {
+            return HTTPReply(422,["error":"Supply id, positive sequence, condition and timeout_ms (0...60000)."])
+        }
+        let condition=query.first(where: { $0.name == "condition" })?.value ?? "acknowledged"
+        guard ["received","acknowledged"].contains(condition) else { return HTTPReply(422,["error":"Condition must be received or acknowledged."]) }
+        let until=Date().addingTimeInterval(Double(timeout)/1000)
+        while true {
+            // Revalidate revocation and pause after every wake, including a timed-out wait.
+            guard let service=ledger.services.first(where: { $0.id == sender.id && $0.digest == sender.digest }) else { return HTTPReply(401,["error":"Service connection no longer exists."]) }
+            guard service.paused != true else { return HTTPReply(423,["error":"Service connection is paused."]) }
+            guard let event=ledger.events.first(where: { $0.service == sender.id && $0.id == id && $0.sequence == sequence && $0.route?.hasPrefix("peer:") == true }),
+                  !id.hasPrefix("@wake:") else { return HTTPReply(404,["error":"Original outgoing direct message tuple was not found."]) }
+            let status=directStatus(event,condition:condition)
+            if status["satisfied"] as? Bool == true || status["state"] as? String == "unconfirmed" || timeout == 0 || Date() >= until { return HTTPReply(200,status) }
+            _=lock.wait(until:until)
+        }
+    }
+    /// Dedicated sender-only metadata stream. It is not a direct inbound subscription,
+    /// does not wake a recipient, and retains its own durable cursor across reconnects.
+    private func directReceiptStream(sender:Service, after:Int, write:(Data)->Bool) {
+        var cursor=after
+        while true {
+            lock.lock()
+            guard ledger.services.contains(where: { $0.id == sender.id && $0.digest == sender.digest && $0.paused != true }) else { lock.unlock(); return }
+            let rows=Array((ledger.directReceipts ?? []).filter { $0.from == sender.id && $0.receiptSequence > cursor }
+                .sorted { $0.receiptSequence < $1.receiptSequence }.prefix(64))
+            if rows.isEmpty {
+                let changed=lock.wait(until:Date().addingTimeInterval(18))
+                lock.unlock()
+                if !changed && !write(Data(": heartbeat\n\n".utf8)) { return }
+                continue
+            }
+            lock.unlock()
+            for row in rows {
+                lock.lock()
+                let active=ledger.services.contains(where: { $0.id == sender.id && $0.digest == sender.digest && $0.paused != true })
+                let retained=(ledger.directReceipts ?? []).contains(where: { $0.receiptSequence == row.receiptSequence && $0.from == sender.id })
+                lock.unlock()
+                guard active else { return }
+                if !retained { cursor=row.receiptSequence; continue }
+                guard let json=try? JSONSerialization.data(withJSONObject:row.wire) else { return }
+                var frame=Data("id: \(row.receiptSequence)\nevent: receipt\ndata: ".utf8)
+                frame.append(json); frame.append(Data("\n\n".utf8))
+                guard write(frame) else { return }
+                cursor=row.receiptSequence
+            }
+        }
+    }
+    private func directDeliveryMeaning(_ event:Event) -> String {
+        let rows=(ledger.directReceipts ?? []).filter { $0.from == event.service && $0.id == event.id && $0.sequence == event.sequence }
+        guard let strongest=rows.max(by: { $0.rank < $1.rank }) else { return "Queued for the recipient." }
+        if strongest.state == "unconfirmed" { return "Delivery unconfirmed." }
+        if strongest.basis == "participant" { return "Read by the recipient via " + strongest.adapter + "." }
+        if strongest.basis == "connection_reply" { return "Recipient replied." }
+        return strongest.state == "acknowledged"
+            ? "Acknowledged by " + strongest.adapter + "."
+            : "Received by " + strongest.adapter + "."
     }
     private func directStream(service:String, after:Int, write:(Data)->Bool) {
         lock.lock()

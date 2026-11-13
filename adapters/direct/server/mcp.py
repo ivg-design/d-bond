@@ -37,13 +37,22 @@ TOOLS = [
          {"alias": STRING, "sequence": {"type": "integer", "minimum": 1}}, ("alias", "sequence")),
     tool("list_direct_peers", "List active or paused direct recipients by stable connection ID and display name.",
          {"alias": STRING}, ("alias",)),
-    tool("send_direct_message", "Send directly to a paired recipient; broker receipt is not an answer. Reuse message_id on retry.",
-         {"alias": STRING, "to": STRING, "text": STRING, "message_id": STRING}, ("alias", "to", "text")),
-    tool("receive_direct_messages", "Read durable inbound messages after a sequence; invoke again or hold a direct-listen stream for future messages.",
-         {"alias": STRING, "after": {"type": "integer", "minimum": 0}}, ("alias",)),
+    tool("send_direct_message", "Send to a paired recipient and briefly await its automatic authenticated acknowledgment. Returns queued, received, or acknowledged with evidence basis; no human success report. Reuse message_id on retry. A content answer is optional and separate.",
+         {"alias": STRING, "to": STRING, "text": STRING, "message_id": STRING,
+          "wait_ms": {"type": "integer", "minimum": 0, "maximum": 60000}}, ("alias", "to", "text")),
+    tool("receive_direct_messages", "Read durable inbound messages after a sequence. This explicit participant read consumes messages by default and silently acknowledges after the tool response. Set consume=false for a diagnostic preview; never use a consuming read solely as keepalive or pagination preview. Invoke again or hold a direct-listen stream for future messages.",
+         {"alias": STRING, "after": {"type": "integer", "minimum": 0},
+          "consume": {"type": "boolean"}}, ("alias",)),
     tool("answer_direct_message", "Answer a received direct message; to must be its exact sender ID.",
-         {"alias": STRING, "to": STRING, "in_reply_to": STRING, "text": STRING, "message_id": STRING},
+         {"alias": STRING, "to": STRING, "in_reply_to": STRING, "text": STRING, "message_id": STRING,
+          "wait_ms": {"type": "integer", "minimum": 0, "maximum": 60000}},
          ("alias", "to", "in_reply_to", "text")),
+    tool("acknowledge_direct_message", "Silently record authenticated participant access to an exact received direct message. Call automatically when processing a pushed message, then continue normal work. Do not send a content answer or human success report just to acknowledge.",
+         {"alias": STRING, "sender_id": STRING, "source_id": STRING,
+          "sequence": {"type": "integer", "minimum": 1}}, ("alias", "sender_id", "source_id", "sequence")),
+    tool("direct_delivery_status", "Reconcile a previous direct send without resending it. Authenticated metadata returns queued, received, or acknowledged and evidence basis. Immediate lookup by default; optional bounded wait_ms up to 60000. Keep success bookkeeping silent; report issues only.",
+         {"alias": STRING, "message_id": STRING, "sequence": {"type": "integer", "minimum": 1},
+          "wait_ms": {"type": "integer", "minimum": 0, "maximum": 60000}}, ("alias", "message_id", "sequence")),
     tool("ask_dot", "Ask Dot, optionally on behalf of an addressed recipient. When the user asks for a plain notification via Herald, pass the active Herald / Notifications connection in to so Dot receives its owner rule.",
          {"alias": STRING, "text": STRING, "to": STRING, "message_id": STRING,
           "timeout": {"type": "integer", "minimum": 1, "maximum": 300}}, ("alias", "text")),
@@ -195,20 +204,18 @@ def invoke(name, args):
     if name == "list_direct_peers":
         return {"services": dbond._direct_peers(pairing)}
     if name in ("send_direct_message", "answer_direct_message"):
-        target = dbond._direct_target(pairing, args["to"])
-        message_id = args.get("message_id") or str(uuid.uuid4())
-        if not dbond.EVENT_RE.fullmatch(message_id) or message_id.startswith("@dot:"):
-            raise ValueError("Invalid direct message ID")
-        body = {"id": message_id, "to": target, "text": args["text"]}
-        if name == "answer_direct_message":
-            body["in_reply_to"] = args["in_reply_to"]
-        status, receipt = dbond._request(pairing, "POST", dbond._direct_url(pairing), body)
-        if status not in (200, 202) or receipt.get("id") != message_id:
-            raise ValueError("Invalid direct message receipt")
-        return {"id": message_id, "to": target, "sequence": receipt["sequence"],
-                "duplicate": receipt["duplicate"], "state": "broker_recorded"}
+        return dbond.direct_send_message(pairing, args["to"], args["text"], message_id=args.get("message_id"),
+                                         in_reply_to=args.get("in_reply_to") if name == "answer_direct_message" else None,
+                                         wait_ms=args.get("wait_ms", 10000))
+    if name == "acknowledge_direct_message":
+        return dbond.direct_delivery_receipt(pairing, args, adapter="mcp-agent",
+                                             state="acknowledged", basis="participant")
+    if name == "direct_delivery_status":
+        return dbond.direct_delivery_summary(pairing, args["message_id"], args["sequence"], wait_ms=args.get("wait_ms", 0))
     if name == "receive_direct_messages":
         after = args.get("after", 0)
+        if type(args.get("consume", True)) is not bool:
+            raise ValueError("consume must be a boolean")
         if type(after) is not int or after < 0:
             raise ValueError("after must be a nonnegative integer")
         status, result = dbond._request(pairing, "GET", dbond._direct_url(pairing) + "?after=" + str(after), timeout=15)
@@ -232,7 +239,7 @@ def main():
             if method == "initialize":
                 result = {"protocolVersion": "2025-06-18", "capabilities": {"tools": {}},
                           "serverInfo": {"name": "d-bond-direct", "version": "0.1.0"},
-                          "instructions": "D-Bond supports correlated Dot requests/replies and separate direct peer messages. A direct send receipt is not an agent answer. For a local Codex chat, enroll_agent attaches a per-chat listener and requests a wake check in the same operation. Use session_status to see the result. An ordinary receive tool does not wake an idle chat."}
+                          "instructions": "D-Bond supports correlated Dot requests/replies and separate direct peer messages. Delivery receipts are automatic metadata, never content answers. Silently call acknowledge_direct_message when processing a pushed direct message with its exact alias/sender/source/sequence; then continue ordinary work. Do not report successful sends or receipt bookkeeping to the human unless asked; report issues. A direct answer is optional and only for actual content. Acknowledged/host_acceptance proves the host accepted delivery, not model access; participant basis records a model-facing read. For a local Codex chat, enroll_agent attaches a per-chat listener and requests a wake check in the same operation. Use session_status to see the result. An ordinary receive tool does not wake an idle chat."}
             elif method == "tools/list":
                 result = {"tools": TOOLS}
             elif method == "tools/call":
@@ -247,6 +254,11 @@ def main():
                 raise ValueError("Unknown method")
             if rid is not None:
                 emit({"jsonrpc": "2.0", "id": rid, "result": result})
+                if method == "tools/call" and name == "receive_direct_messages" and args.get("consume", True):
+                    pairing = dbond._read_pairing(args["alias"])
+                    for event in json.loads(result["content"][0]["text"])["messages"]:
+                        dbond.direct_delivery_receipt(pairing, event, adapter="mcp-read",
+                                                      state="acknowledged", basis="participant")
         except (ValueError, KeyError, TypeError, SystemExit, OSError) as exc:
             if isinstance(request, dict) and request.get("id") is not None:
                 emit({"jsonrpc": "2.0", "id": request["id"], "error": {"code": -32000, "message": str(exc)}})

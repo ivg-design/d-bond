@@ -10,7 +10,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import host_queue
 import ipc
@@ -81,35 +81,51 @@ class ListenerTests(unittest.TestCase):
             self.assertEqual([r["method"] for r in host.requests],
                              ["initialize", "initialize", "thread-owner-discovery"])
 
-    def test_queue_pointer_excludes_payload_and_is_exact(self):
-        prompt = host_queue.pointer(THREAD, BOUND["alias"], "direct", 12, EVENT["id"])
-        self.assertIn("~/.local/bin/dbond direct-inbox", prompt)
-        self.assertIn("--after 11", prompt)
-        self.assertNotIn(EVENT["text"], prompt)
-        self.assertIn("not a human message", prompt)
-        wake = host_queue.pointer(THREAD, BOUND["alias"], "direct", 13,
-                                  "@wake:" + THREAD)
-        self.assertIn(f"wake-ack {BOUND['alias']} 13", wake)
-        self.assertNotIn("wake-ack", prompt)
-        dot = host_queue.pointer(THREAD, BOUND["alias"], "dot", 14, "@dot:17")
-        self.assertIn("dot-inbox", dot)
-        self.assertIn("--after 13 --through 14", dot)
-        backlog = host_queue.pointer(THREAD, BOUND["alias"], "dot", 25,
-                                     "batch-18-25", first_after=17)
-        self.assertIn("--after 17 --through 25", backlog)
-        with self.assertRaises(ValueError):
-            host_queue.pointer(THREAD, BOUND["alias"], "direct", 12, "bad `shell`")
+    def test_inline_preserves_body_origin_and_correlation(self):
+        body = "  First  line\n\n```python\nprint('雪  🦉')\n```\nlast line  "
+        event = {**EVENT, "text": body, "in_reply_to": "question-1"}
+        for lane, sender in (("direct", SENDER), ("direct", "owner"), ("dot", "dot")):
+            item = {**event, "from": sender}
+            if lane == "dot":
+                item["id"] = "@dot:17"
+            prompt = host_queue.inline_message(BOUND["alias"], lane, item)
+            self.assertIn(body, prompt)
+            self.assertEqual(prompt.count(body), 1)
+            self.assertIn(item["id"], prompt)
+            self.assertIn(str(item["sequence"]), prompt)
+            self.assertIn(sender, prompt)
+            self.assertIn("question-1", prompt)
+            self.assertNotIn("direct-inbox", prompt)
+            self.assertNotIn("dot-inbox", prompt)
+        retained = host_queue.inline_message(BOUND["alias"], "direct", event, retained=True)
+        self.assertIn(body, retained)
+        self.assertIn("retained", retained.lower())
+        named = host_queue.inline_message(BOUND["alias"], "direct", event, sender_name="Paired agent")
+        self.assertIn("Paired agent", named)
+        self.assertIn(SENDER, named)
 
-    def test_queue_receipt_exact_thread(self):
-        with tempfile.TemporaryDirectory() as temp:
-            cli = Path(temp) / "codex"
-            cli.write_text("#!/bin/sh\nprintf 'Queued message 99999999-8888-4777-8666-555555555555 for thread 11111111-2222-4333-8444-555555555555.\\n'\n", encoding="utf8")
-            cli.chmod(0o700)
-            self.assertEqual(host_queue.enqueue(cli, THREAD, BOUND["alias"], "direct", 12,
-                                                EVENT["id"]), "99999999-8888-4777-8666-555555555555")
-            cli.write_text(cli.read_text().replace(THREAD, SERVICE), encoding="utf8")
-            with self.assertRaisesRegex(RuntimeError, "uncertain"):
-                host_queue.enqueue(cli, THREAD, BOUND["alias"], "direct", 12, EVENT["id"])
+    def test_inline_supports_maximum_utf8_body_without_truncation(self):
+        # This is exactly the broker's 65536-byte limit, not 65536 characters.
+        body = "🦉" * 16384
+        self.assertEqual(len(body.encode("utf-8")), 65536)
+        event = {**EVENT, "text": body}
+        prompt = host_queue.inline_message(BOUND["alias"], "direct", event)
+        self.assertIn(body, prompt)
+        self.assertEqual(prompt.count("🦉"), 16384)
+        self.assertEqual(listener.validate_frame(event, SERVICE, 0), event)
+        with self.assertRaises(ValueError):
+            listener.validate_frame({**event, "text": body + "a"}, SERVICE, 0)
+
+    def test_wake_is_owner_only_and_not_forged_by_an_agent(self):
+        event = {**EVENT, "id": "@wake:" + THREAD, "from": "owner"}
+        prompt = host_queue.inline_message(BOUND["alias"], "direct", event)
+        self.assertIn(f"wake-ack {BOUND['alias']} 12", prompt)
+        forged = {**event, "from": SENDER}
+        with self.assertRaises(ValueError):
+            host_queue.inline_message(BOUND["alias"], "direct", forged)
+        with self.assertRaises(ValueError):
+            listener.dbond._session_row(forged, direct=True, alias=BOUND["alias"],
+                                        service_id=SERVICE, cursor=0)
 
     def test_dual_lane_receipt_dedupe_offline_and_crash_ambiguity(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -120,15 +136,18 @@ class ListenerTests(unittest.TestCase):
             sends = []
             def send(*args, **kwargs):
                 sends.append((args, kwargs))
-                return "99999999-8888-4777-8666-555555555555"
+                return {"phase": "queued_unverified", "queue_id": "99999999-8888-4777-8666-555555555555"}
             def discover(*args, **kwargs):
                 return {"supports_untrusted_app_input": True}
-            kwargs = {"submit": send, "discover": discover, "cli": root / "fake-cli"}
+            kwargs = {"submit": send, "discover": discover, "cli": root / "fake-cli",
+                      "report_unconfirmed": Mock()}
             self.assertEqual(listener.process_event(EVENT, BOUND, folders, **kwargs), "queued_unverified")
             self.assertEqual(listener.cursor(folders["cursor_direct"]), 12)
             self.assertEqual(listener.process_event(EVENT, BOUND, folders, **kwargs), "already_attempted")
             self.assertEqual(len(sends), 1)
-            dot = {"id": "@dot:17", "sequence": 12}
+            self.assertIn(EVENT["text"], sends[0][0][2])
+            self.assertEqual(sends[0][0][1], THREAD)
+            dot = {**EVENT, "id": "@dot:17", "from": "dot", "sequence": 12}
             self.assertEqual(listener.process_event(dot, BOUND, folders, lane="dot", **kwargs), "queued_unverified")
             self.assertEqual(listener.cursor(folders["cursor_dot"]), 12)
             self.assertEqual(len(sends), 2)
@@ -142,10 +161,195 @@ class ListenerTests(unittest.TestCase):
             crashed = {**EVENT, "id": "direct-test-3", "sequence": 14}
             receipt = listener.receipt_file(folders["receipts"], crashed)
             listener.save_json(receipt, {"event_id": crashed["id"], "sequence": 14, "phase": "sending"})
-            self.assertEqual(listener.process_event(crashed, BOUND, folders, **kwargs), "already_attempted")
+            self.assertEqual(listener.process_event(crashed, BOUND, folders, **kwargs), "ambiguous")
             self.assertEqual(listener.private_json(receipt)["phase"], "ambiguous")
             self.assertEqual(listener.cursor(folders["cursor_direct"]), 14)
             self.assertEqual(len(sends), 3)
+
+    def test_steer_receipt_is_durable_and_failure_is_not_resent(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            folders = {"receipts": root / "receipts", "cursor_direct": root / "direct.json",
+                       "cursor_dot": root / "dot.json"}
+            folders["receipts"].mkdir(mode=0o700)
+            owner = {"supports_untrusted_app_input": True, "handled_by_client_id": "host-owner"}
+            def discover(*_, **__):
+                return owner
+            submit = Mock(return_value={"phase": "steered", "turn_id": "turn-123"})
+            kwargs = {"submit": submit, "discover": discover, "cli": root / "fake-cli",
+                      "acknowledge": lambda *_: {"state": "acknowledged"},
+                      "report_unconfirmed": Mock()}
+            self.assertEqual(listener.process_event(EVENT, BOUND, folders, **kwargs), "steered")
+            self.assertEqual(listener.process_event(EVENT, BOUND, folders, **kwargs), "already_attempted")
+            submit.assert_called_once()
+            self.assertEqual(submit.call_args.args[3], owner)
+            receipt = listener.private_json(listener.receipt_file(folders["receipts"], EVENT))
+            self.assertEqual(receipt["phase"], "steered")
+            self.assertEqual(receipt["turn_id"], "turn-123")
+            later = {**EVENT, "id": "uncertain-message", "sequence": 13}
+            submit.side_effect = TimeoutError("host response was lost")
+            self.assertEqual(listener.process_event(later, BOUND, folders, **kwargs), "ambiguous")
+            self.assertEqual(listener.process_event(later, BOUND, folders, **kwargs), "already_attempted")
+            self.assertEqual(submit.call_count, 2)
+            self.assertEqual(listener.cursor(folders["cursor_direct"]), 13)
+
+    def test_unconfirmed_metadata_retries_after_timeout_or_crash_without_host_resubmit(self):
+        for crashed in (False, True):
+            with self.subTest(crashed=crashed), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                folders = {"receipts": root / "receipts", "cursor_direct": root / "direct.json",
+                           "cursor_dot": root / "dot.json"}
+                folders["receipts"].mkdir(mode=0o700)
+                if crashed:
+                    listener.save_json(listener.receipt_file(folders["receipts"], EVENT),
+                        {"event_id": EVENT["id"], "sequence": 12, "phase": "sending"})
+                submit = Mock(side_effect=TimeoutError("host response unknown"))
+                report = Mock(side_effect=[OSError("broker offline"), {"state": "unconfirmed"}])
+                discover = Mock(return_value={"supports_untrusted_app_input": True})
+                acknowledge = Mock()
+                kwargs = {"submit": submit, "discover": discover, "acknowledge": acknowledge,
+                          "report_unconfirmed": report}
+                self.assertEqual(listener.process_event(EVENT, BOUND, folders, **kwargs), "receipt_pending")
+                self.assertEqual(listener.cursor(folders["cursor_direct"]), 0)
+                record = listener.private_json(listener.receipt_file(folders["receipts"], EVENT))
+                self.assertEqual(record["phase"], "ambiguous")
+                self.assertTrue(record["unconfirmed_pending"])
+                discover.side_effect = ipc.OwnerUnavailable("host offline")
+                self.assertEqual(listener.process_event(EVENT, BOUND, folders, **kwargs), "ambiguous")
+                self.assertEqual(listener.cursor(folders["cursor_direct"]), 12)
+                self.assertEqual(listener.process_event(EVENT, BOUND, folders, **kwargs), "already_attempted")
+                self.assertEqual(report.call_count, 2)
+                report.assert_called_with(BOUND, EVENT)
+                self.assertEqual(submit.call_count, 0 if crashed else 1)
+                acknowledge.assert_not_called()
+
+    def test_unconfirmed_is_peer_only_and_requires_an_actual_uncertain_attempt(self):
+        cases = [("direct", EVENT, "queued_unverified"),
+                 ("direct", EVENT, "ambiguous"),
+                 ("direct", {**EVENT, "from": "owner"}, "sending"),
+                 ("dot", {**EVENT, "id": "@dot:17", "from": "dot"}, "sending")]
+        for lane, event, phase in cases:
+            with self.subTest(lane=lane, phase=phase), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                folders = {"receipts": root / "receipts", "cursor_direct": root / "direct.json",
+                           "cursor_dot": root / "dot.json"}
+                folders["receipts"].mkdir(mode=0o700)
+                listener.save_json(listener.receipt_file(folders["receipts"], event, lane),
+                    {"event_id": event["id"], "sequence": 12, "phase": phase})
+                report, submit = Mock(), Mock()
+                self.assertEqual(listener.process_event(event, BOUND, folders, lane=lane,
+                    submit=submit, report_unconfirmed=report), "already_attempted")
+                report.assert_not_called()
+                submit.assert_not_called()
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            folders = {"receipts": root / "receipts", "cursor_direct": root / "direct.json",
+                       "cursor_dot": root / "dot.json"}
+            folders["receipts"].mkdir(mode=0o700)
+            report, submit = Mock(), Mock()
+            self.assertEqual(listener.process_event(EVENT, BOUND, folders, submit=submit,
+                discover=Mock(side_effect=ipc.OwnerUnavailable("not attached")),
+                report_unconfirmed=report), "owner_offline")
+            report.assert_not_called()
+            submit.assert_not_called()
+            self.assertEqual(listener.cursor(folders["cursor_direct"]), 0)
+
+    def test_unconfirmed_wrapper_reports_exact_host_unknown_basis_and_defers_queued_metadata(self):
+        pair = {"id": SERVICE}
+        with patch.object(listener, "pairing_service", return_value=(pair, SERVICE)), \
+             patch.object(listener.dbond, "direct_delivery_receipt", return_value={"state": "unconfirmed"}) as report:
+            listener.report_host_unconfirmed(BOUND, EVENT)
+            report.assert_called_once_with(pair, EVENT, adapter="codex-session",
+                state="unconfirmed", basis="host_result_unknown")
+            report.return_value = {"state": "receipt_queued"}
+            with self.assertRaises(OSError):
+                listener.report_host_unconfirmed(BOUND, EVENT)
+        with patch.object(listener, "pairing_service", return_value=(pair, SENDER)), \
+             patch.object(listener.dbond, "direct_delivery_receipt") as report:
+            with self.assertRaises(ValueError):
+                listener.report_host_unconfirmed(BOUND, EVENT)
+            report.assert_not_called()
+
+    def test_automatic_ack_retries_without_reinjecting_host_message(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            folders = {"receipts": root / "receipts", "cursor_direct": root / "direct.json",
+                       "cursor_dot": root / "dot.json"}
+            folders["receipts"].mkdir(mode=0o700)
+            submit = Mock(return_value={"phase": "steered", "turn_id": "accepted-turn"})
+            acknowledge = Mock(side_effect=[ConnectionError("broker offline"),
+                                            {"state": "acknowledged"}])
+            kwargs = {"submit": submit, "acknowledge": acknowledge,
+                      "discover": Mock(return_value={"supports_untrusted_app_input": True}),
+                      "cli": root / "fake-cli"}
+            self.assertEqual(listener.process_event(EVENT, BOUND, folders, **kwargs), "receipt_pending")
+            self.assertEqual(listener.cursor(folders["cursor_direct"]), 0)
+            self.assertEqual(submit.call_count, 1)
+            # Once the host accepted, offline/restarted host discovery must not
+            # block a broker-only retry or cause another model injection.
+            kwargs["discover"].side_effect = ipc.OwnerUnavailable("host now offline")
+            self.assertEqual(listener.process_event(EVENT, BOUND, folders, **kwargs), "steered")
+            self.assertEqual(listener.cursor(folders["cursor_direct"]), 12)
+            self.assertEqual(submit.call_count, 1)
+            self.assertEqual(acknowledge.call_count, 2)
+            acknowledge.assert_called_with(BOUND, EVENT)
+            self.assertEqual(listener.process_event(EVENT, BOUND, folders, **kwargs), "already_attempted")
+            self.assertEqual(acknowledge.call_count, 2)
+            self.assertEqual(submit.call_count, 1)
+
+    def test_idle_started_turn_also_acknowledges_peer_automatically(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            folders = {"receipts": root / "receipts", "cursor_direct": root / "direct.json",
+                       "cursor_dot": root / "dot.json"}
+            folders["receipts"].mkdir(mode=0o700)
+            acknowledge = Mock()
+            outcome = listener.process_event(EVENT, BOUND, folders,
+                submit=Mock(return_value={"phase": "started", "turn_id": "idle-turn"}),
+                acknowledge=acknowledge,
+                discover=Mock(return_value={"supports_untrusted_app_input": True}),
+                cli=root / "fake-cli")
+            self.assertEqual(outcome, "started")
+            acknowledge.assert_called_once_with(BOUND, EVENT)
+            self.assertEqual(listener.cursor(folders["cursor_direct"]), 12)
+
+    def test_unconfirmed_or_ineligible_messages_do_not_claim_recipient_ack(self):
+        cases = [
+            ("direct", EVENT, {"phase": "queued_unverified", "queue_id": "queue-1"}),
+            ("dot", {**EVENT, "from": "dot", "id": "@dot:17"},
+             {"phase": "steered", "turn_id": "turn-1"}),
+            ("direct", {**EVENT, "from": "owner"}, {"phase": "steered", "turn_id": "turn-1"}),
+            ("direct", {**EVENT, "from": "owner", "id": "@wake:" + THREAD},
+             {"phase": "steered", "turn_id": "turn-1"}),
+        ]
+        for lane, event, result in cases:
+            with self.subTest(lane=lane, sender=event["from"], phase=result["phase"]):
+                with tempfile.TemporaryDirectory() as temp:
+                    root = Path(temp)
+                    folders = {"receipts": root / "receipts", "cursor_direct": root / "direct.json",
+                               "cursor_dot": root / "dot.json"}
+                    folders["receipts"].mkdir(mode=0o700)
+                    acknowledge = Mock()
+                    outcome = listener.process_event(event, BOUND, folders, lane=lane,
+                        submit=Mock(return_value=result), acknowledge=acknowledge,
+                        discover=Mock(return_value={"supports_untrusted_app_input": True}),
+                        cli=root / "fake-cli")
+                    self.assertEqual(outcome, result["phase"])
+                    acknowledge.assert_not_called()
+
+    def test_host_ack_uses_exact_bound_pairing_and_host_acceptance_basis(self):
+        pair = {"id": SERVICE}
+        with patch.object(listener, "pairing_service", return_value=(pair, SERVICE)), \
+             patch.object(listener.dbond, "direct_delivery_receipt", create=True,
+                          return_value={"state": "acknowledged"}) as ack:
+            listener.acknowledge_host(BOUND, EVENT)
+            ack.assert_called_once_with(pair, EVENT, adapter="codex-session",
+                                        state="acknowledged", basis="host_acceptance")
+        with patch.object(listener, "pairing_service", return_value=(pair, SENDER)), \
+             patch.object(listener.dbond, "direct_delivery_receipt", create=True) as ack:
+            with self.assertRaises(ValueError):
+                listener.acknowledge_host(BOUND, EVENT)
+            ack.assert_not_called()
 
     def test_status_requires_both_streams_and_owner(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -193,15 +397,11 @@ class ListenerTests(unittest.TestCase):
                     "lastWakeVerifiedAt": "2026-11-12T20:00:00Z"}
         with patch.object(listener, "binding", return_value=BOUND), \
              patch.object(listener.ipc, "discover_owner") as discover, \
-             patch.object(listener.host_queue, "find_cli", return_value=Path("/fake/codex")) as find, \
-             patch.object(listener.host_queue, "verify_cli") as verify, \
              patch.object(listener.dbond, "session_status", return_value=observed) as broker:
             fresh = listener.refreshed_status(THREAD, dict(raw))
             self.assertTrue(fresh["ready"])
             self.assertEqual(fresh["wakeState"], "verified")
             discover.assert_called_once()
-            find.assert_called_once()
-            verify.assert_called_once()
             broker.assert_called_once_with(BOUND["alias"])
         with patch.object(listener.ipc, "discover_owner", side_effect=ipc.OwnerUnavailable("closed")), \
              patch.object(listener, "binding", return_value=BOUND), \
@@ -236,13 +436,11 @@ class ListenerTests(unittest.TestCase):
                      patch.object(listener.threading, "Thread", side_effect=make_thread), \
                      patch.object(listener.signal, "signal"), \
                      patch.object(listener.ipc, "discover_owner") as discover, \
-                     patch.object(listener.dbond, "session_status", return_value={}) as broker, \
-                     patch.object(listener.host_queue, "find_cli") as find_cli:
+                     patch.object(listener.dbond, "session_status", return_value={}) as broker:
                     self.assertEqual(listener.run(THREAD)["state"], "stopped")
                     self.assertEqual(len(thread_targets), 2)
                     discover.assert_called_once()
                     broker.assert_called_once()
-                    find_cli.assert_not_called()
             finally:
                 listener.EXIT.clear()
 
@@ -261,7 +459,7 @@ class ListenerTests(unittest.TestCase):
         self.assertTrue(urls[0].endswith("/messages/head"))
         self.assertIn("/events/history?after=12&through=", urls[1])
 
-    def test_initial_backlog_is_one_notice_and_current_wake_is_separate(self):
+    def test_initial_backlog_delivers_each_body_in_order_and_current_wake_separately(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             folders = {"cursor_direct": root / "direct.json", "cursor_dot": root / "dot.json",
@@ -291,19 +489,21 @@ class ListenerTests(unittest.TestCase):
                 def update(self, **_):
                     pass
             notices = []
-            def deliver(event, _bound, _folders, lane, _server, *, first_after=None):
-                notices.append((event["id"], first_after))
+            def deliver(event, _bound, _folders, lane, _server, *, retained=False):
+                notices.append((event["id"], event["text"], retained))
                 listener.advance(folders["cursor_direct"], event["sequence"])
             listener.EXIT.clear()
             try:
                 with patch.object(listener, "verify_pairing", return_value=pair), \
                      patch.object(listener, "snapshot_highwater", return_value=2), \
                      patch.object(listener.dbond, "Stream", FakeStream), \
+                     patch.object(listener.dbond, "_direct_peers", return_value=[]), \
                      patch.object(listener, "deliver", side_effect=deliver):
                     listener.lane_loop("direct", BOUND, folders, FakeStatus(), {}, threading.Lock())
             finally:
                 listener.EXIT.clear()
-            self.assertEqual(notices, [("batch-1-2", 0), ("@wake:" + THREAD, None)])
+            self.assertEqual(notices, [("old-a", "a", True), ("old-b", "b", True),
+                                       ("@wake:" + THREAD, "wake check", False)])
             self.assertEqual(listener.cursor(folders["cursor_direct"]), 3)
 
 

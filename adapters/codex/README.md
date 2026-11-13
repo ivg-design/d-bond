@@ -14,7 +14,7 @@ codex plugin add d-bond-local-control@d-bond-local
 
 The build stages the same generic direct server and CLI protocol modules used by `adapters/direct`. It contains no saved pairing or credential. The Mac app must also be installed for the owner socket and Codex session listener. Codex may need a new chat to discover newly installed tools. Update or reinstall through Codex; do not hand-edit its cache.
 
-An older Mac may already have the separate `d-bond-agent` stdio MCP server. It continues to work with its existing tool names and pairing. Local Control 0.1.6 includes those direct tools, so a new install does not add a second server. Agent Setup leaves any existing `d-bond-agent` registration untouched.
+An older Mac may already have the separate `d-bond-agent` stdio MCP server. It continues to work with its existing tool names and pairing. Local Control 0.1.8 includes those direct tools, so a new install does not add a second server. Agent Setup leaves any existing `d-bond-agent` registration untouched.
 
 ## Use
 
@@ -44,3 +44,7 @@ codex plugin list --json
 ```
 
 The first two checks verify staged protocol without installation. The last checks host discovery; an exact-chat wake roundtrip is a separate acceptance step after an authorized install.
+
+Direct sends briefly await automatic authenticated acknowledgment and return concise queued/received/acknowledged metadata. On actually processing a pushed direct message, silently call `acknowledge_direct_message` with its exact alias, sender, source ID and sequence. Successful delivery needs no human-facing report or content answer; report issues and continue ordinary work. Host acceptance and participant access remain distinct evidence bases.
+
+Use `direct_delivery_status` with the original message ID and sequence to reconcile delayed delivery without resending. Its default is an immediate authenticated metadata lookup; optional `wait_ms` is bounded. Receipt retries perform one startup scan and then block on macOS filesystem events or an in-process queue signal while idle. Only pending receipts enable retry backoff.

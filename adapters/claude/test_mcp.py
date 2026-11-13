@@ -30,9 +30,19 @@ def exchange(channel=False, interpreter=None, native=False):
         host_session_id = "11111111-2222-3333-4444-555555555555"
         if channel:
             env.update(DBOND_CLAUDE_CHANNEL="1", DBOND_CLAUDE_ALIAS="claude-document-review")
+        receipts = []
         class Endpoint(BaseHTTPRequestHandler):
             def log_message(self, *_):
                 pass
+            def do_POST(self):
+                assert self.path == f"/v1/services/{service_id}/messages/receipt"
+                assert self.headers.get("Authorization") == "Bearer c2VjcmV0"
+                row = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                receipts.append(row)
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"receipt": row, "duplicate": False}).encode())
             def do_GET(self):
                 if self.path.endswith("/peers"):
                     self.send_response(200)
@@ -91,7 +101,7 @@ def exchange(channel=False, interpreter=None, native=False):
             proc.stdin.flush()
             tools = request(2, "tools/list")["result"]["tools"]
             expected = {"local_status", "enroll", "session_status", "acknowledge_wake",
-                        "peers", "ask", "answer", "direct_peers", "direct_send", "direct_answer"}
+                        "peers", "ask", "answer", "direct_peers", "direct_send", "direct_answer", "acknowledge_direct_message", "direct_status"}
             if not channel:
                 expected.update(("wait_for_push", "wait_for_direct"))
             assert {t["name"] for t in tools} == expected
@@ -134,6 +144,12 @@ def exchange(channel=False, interpreter=None, native=False):
                     if saved.get("cursor")==1 and saved.get("direct_cursor")==2: break
                     time.sleep(.02)
                 assert saved["cursor"] == 1 and "@dot:9" in saved["pushes"] and saved["direct_cursor"] == 2
+                assert receipts == [{"from": sender_id, "id": "direct-9", "sequence": 2,
+                                      "state": "received", "basis": "host_acceptance", "adapter": "claude-channel"}]
+                ack = request(32, "tools/call", {"name": "acknowledge_direct_message", "arguments": {
+                    "sender_id": sender_id, "source_id": "direct-9", "sequence": 2}})
+                assert not ack["result"].get("isError"), ack
+                assert receipts[-1]["state"] == "acknowledged" and receipts[-1]["basis"] == "participant"
             else:
                 waited = request(4, "tools/call", {"name": "wait_for_direct", "arguments": {
                     "alias": "claude-document-review", "timeout": 2}})
@@ -144,6 +160,9 @@ def exchange(channel=False, interpreter=None, native=False):
                 while json.loads(pairing.read_text()).get("direct_cursor") != 2 and time.monotonic()<until:
                     time.sleep(.02)
                 assert json.loads(pairing.read_text())["direct_cursor"] == 2
+                until=time.monotonic()+2
+                while not receipts and time.monotonic()<until: time.sleep(.02)
+                assert receipts[-1]["state"] == "acknowledged" and receipts[-1]["basis"] == "participant"
         finally:
             proc.stdin.close()
             proc.wait(timeout=5)
@@ -209,7 +228,7 @@ def concurrent_code_sessions_same_title():
     source = ROOT / "adapters/claude/server/mcp.py"
     manifest = json.loads((ROOT / "adapters/claude/plugin/.claude-plugin/plugin.json").read_text())
     channel_mcp = json.loads((ROOT / "adapters/claude/plugin/.mcp.json").read_text())
-    assert manifest["version"] == "0.1.10" and "userConfig" not in manifest
+    assert manifest["version"] == "0.1.12" and "userConfig" not in manifest
     assert channel_mcp["mcpServers"]["d-bond"]["env"] == {"DBOND_CLAUDE_CHANNEL": "1"}
     def instance(name):
         spec = importlib.util.spec_from_file_location(name, source)
@@ -293,6 +312,13 @@ def direct_tool_commands():
                         ("direct-send", "fixture", "Claude / Review", "Question", "--message-id", "direct-q-1"),
                         ("direct-answer", "fixture", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "direct-q-1", "Answer", "--message-id", "direct-r-1")]
     pairing = {"endpoint": "http://127.0.0.1:18768/v1/services/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/events"}
+    result = {"id": "direct-q-1", "sequence": 7, "state": "acknowledged", "basis": "participant"}
+    with mock.patch.object(mcp.dbond, "_read_pairing", return_value=pairing), \
+         mock.patch.object(mcp.dbond, "direct_delivery_summary", return_value=result) as status, \
+         mock.patch.object(mcp, "direct_send") as sender:
+        assert mcp.call_tool("direct_status", {"alias": "fixture", "message_id": "direct-q-1", "sequence": 7}) == result
+        status.assert_called_once_with(pairing, "direct-q-1", 7, wait_ms=0)
+        sender.assert_not_called()
     owner_note = {"id": "owner-setup-1", "sequence": 3, "from": "owner",
                   "to": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "text": "Setup note"}
     sender_id = "bbbbbbbb-cccc-dddd-eeee-ffffffffffff"

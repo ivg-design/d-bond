@@ -22,6 +22,7 @@ final class LedgerStore {
             try exec("CREATE TABLE IF NOT EXISTS services (id TEXT PRIMARY KEY, body BLOB NOT NULL)")
             try exec("CREATE TABLE IF NOT EXISTS events (service TEXT NOT NULL, id TEXT NOT NULL, body BLOB NOT NULL, PRIMARY KEY(service,id))")
             try exec("CREATE TABLE IF NOT EXISTS receipts (sequence INTEGER PRIMARY KEY, body BLOB NOT NULL)")
+            try exec("CREATE TABLE IF NOT EXISTS direct_receipts (sequence INTEGER PRIMARY KEY, body BLOB NOT NULL)")
             try exec("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value INTEGER NOT NULL)")
         } catch { sqlite3_close(handle); throw error }
     }
@@ -59,12 +60,13 @@ final class LedgerStore {
         let services:[Service] = try rows("services")
         let events:[Event] = try rows("events")
         let receipts:[Receipt] = try rows("receipts")
+        let directReceipts:[DirectReceipt] = try rows("direct_receipts")
         let stmt = try statement("SELECT value FROM meta WHERE key='seq'")
         defer { sqlite3_finalize(stmt) }
         let outcome = sqlite3_step(stmt)
         guard outcome == SQLITE_ROW || outcome == SQLITE_DONE else { throw Fault.message("Ledger metadata read failed.") }
         let seq = outcome == SQLITE_ROW ? Int(sqlite3_column_int64(stmt,0)) : 0
-        return Ledger(services:services,events:events,receipts:receipts,seq:seq)
+        return Ledger(services:services,events:events,receipts:receipts,directReceipts:directReceipts,seq:seq)
     }
     func loadOrMigrate(legacy:URL) throws -> Ledger {
         let marker = try statement("SELECT value FROM meta WHERE key='legacy_imported'")
@@ -102,7 +104,9 @@ final class LedgerStore {
             let rmEvent = try statement("DELETE FROM events WHERE service=? AND id=?")
             let upReceipt = try statement("INSERT INTO receipts(sequence,body) VALUES(?,?) ON CONFLICT(sequence) DO UPDATE SET body=excluded.body")
             let rmReceipt = try statement("DELETE FROM receipts WHERE sequence=?")
-            defer { for stmt in [upService,rmService,upEvent,rmEvent,upReceipt,rmReceipt] { sqlite3_finalize(stmt) } }
+            let upDirectReceipt = try statement("INSERT INTO direct_receipts(sequence,body) VALUES(?,?) ON CONFLICT(sequence) DO UPDATE SET body=excluded.body")
+            let rmDirectReceipt = try statement("DELETE FROM direct_receipts WHERE sequence=?")
+            defer { for stmt in [upService,rmService,upEvent,rmEvent,upReceipt,rmReceipt,upDirectReceipt,rmDirectReceipt] { sqlite3_finalize(stmt) } }
             func step(_ stmt:OpaquePointer) throws {
                 guard sqlite3_step(stmt) == SQLITE_DONE else { throw Fault.message("Ledger write failed: \(String(cString:sqlite3_errmsg(db)))") }
                 sqlite3_reset(stmt); sqlite3_clear_bindings(stmt)
@@ -114,6 +118,7 @@ final class LedgerStore {
                 let pair=id.split(separator:"\u{0}",maxSplits:1).map(String.init); bind(pair[0],to:upEvent,at:1); bind(pair[1],to:upEvent,at:2); bind(body,to:upEvent,at:3); try step(upEvent)
             })
             try changed(old:old.receipts ?? [],next:next.receipts ?? [],key:{$0.sequence},remove:{ seq in sqlite3_bind_int64(rmReceipt,1,Int64(seq)); try step(rmReceipt) },upsert:{ seq,body in sqlite3_bind_int64(upReceipt,1,Int64(seq)); bind(body,to:upReceipt,at:2); try step(upReceipt) })
+            try changed(old:old.directReceipts ?? [],next:next.directReceipts ?? [],key:{$0.receiptSequence},remove:{ seq in sqlite3_bind_int64(rmDirectReceipt,1,Int64(seq)); try step(rmDirectReceipt) },upsert:{ seq,body in sqlite3_bind_int64(upDirectReceipt,1,Int64(seq)); bind(body,to:upDirectReceipt,at:2); try step(upDirectReceipt) })
             if old.seq != next.seq {
                 let stmt = try statement("INSERT OR REPLACE INTO meta(key,value) VALUES('seq',?)")
                 defer { sqlite3_finalize(stmt) }

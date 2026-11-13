@@ -90,7 +90,8 @@ class MCPTest(unittest.TestCase):
         rows = [json.loads(line) for line in output.getvalue().splitlines()]
         self.assertTrue(rows[0]["result"]["isError"])
         self.assertEqual(rows[1]["id"], 2)
-        self.assertEqual(len(rows[1]["result"]["tools"]), 16)
+        self.assertEqual(len(rows[1]["result"]["tools"]), 18)
+        self.assertIn("acknowledge_direct_message", {tool["name"] for tool in rows[1]["result"]["tools"]})
 
     def test_local_status_is_read_only_and_requires_no_pairing(self):
         with mock.patch.object(mcp.owner, "local_status", return_value={"installation": "installed", "service": "offline"}) as check:

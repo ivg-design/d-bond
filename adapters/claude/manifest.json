@@ -2,18 +2,24 @@
   "manifest_version": "0.3",
   "name": "d-bond",
   "display_name": "D-Bond",
-  "version": "0.1.8",
+  "version": "0.1.10",
   "description": "Use one local D-Bond pairing for Dot messages and direct messages with other paired services.",
-  "author": {"name": "IVG"},
+  "author": {
+    "name": "IVG"
+  },
   "server": {
     "type": "binary",
     "entry_point": "server/d-bond-launcher",
     "mcp_config": {
       "command": "/bin/sh",
-      "args": ["${__dirname}/server/launch.sh"]
+      "args": [
+        "${__dirname}/server/launch.sh"
+      ]
     }
   },
   "compatibility": {
-    "platforms": ["darwin"]
+    "platforms": [
+      "darwin"
+    ]
   }
 }

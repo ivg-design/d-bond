@@ -6,7 +6,7 @@ https://github.com/yieldspace/agmsg-codex-relay
 
 This is a small independent implementation. It identifies itself truthfully as
 ``D-Bond`` and does not impersonate a first-party client. The IPC is private and
-version-sensitive; this module never submits a turn.
+version-sensitive. Delivery uses the exact Desktop owner and never impersonates a client.
 """
 
 from __future__ import annotations
@@ -44,6 +44,19 @@ def _validate_socket(path: Path) -> os.stat_result:
     if stat.S_IMODE(metadata.st_mode) & 0o077:
         raise CodexWakeError("Codex IPC socket grants group or other access")
     return metadata
+
+
+class IPCRejected(CodexWakeError):
+    """An explicit router or owner rejection, distinct from transport uncertainty."""
+
+    def __init__(self, method: str, error: Any):
+        self.method = method
+        self.error = str(error)
+        super().__init__(f"Codex IPC {method} rejected: {self.error}")
+
+
+class DeliveryUncertain(CodexWakeError):
+    """Delivery may have reached the owner; reconcile before any retry."""
 
 
 class _Client:
@@ -152,9 +165,7 @@ class _Client:
             if response.get("type") != "response" or response.get("requestId") != request_id:
                 continue
             if response.get("resultType") != "success":
-                raise CodexWakeError(
-                    f"Codex IPC {method} rejected: {response.get('error', 'unknown error')}"
-                )
+                raise IPCRejected(method, response.get("error", "unknown error"))
             return response
 
     def initialize(self) -> str:
@@ -204,5 +215,97 @@ def discover_owner(thread_id: str, *, timeout: float = DEFAULT_TIMEOUT,
             raise CodexWakeError("Codex owner does not support untrusted app input")
         return {"thread_id": thread_id, "handled_by_client_id": client_id,
                 "supports_untrusted_app_input": True}
+    finally:
+        client.close()
+
+
+def deliver_to_owner(thread_id: str, prompt: str, owner: dict[str, Any], *,
+                     timeout: float = DEFAULT_TIMEOUT,
+                     socket_path: Path = SOCKET_PATH) -> dict[str, str]:
+    """Steer the exact Desktop owner, or start after an explicit inactive rejection.
+
+    No queue, standalone CLI resume, client impersonation, permission override,
+    or cross-server fallback is allowed. A transport failure is not a retry cue.
+    Acceptance confirms host submission, not model consumption or a reply.
+    """
+    thread_id = str(uuid.UUID(thread_id))
+    if not isinstance(prompt, str) or not prompt.strip():
+        raise ValueError("Delivery requires nonempty message text")
+    if (owner.get("thread_id") != thread_id or
+            owner.get("supports_untrusted_app_input") is not True or
+            not isinstance(owner.get("handled_by_client_id"), str) or
+            not owner["handled_by_client_id"]):
+        raise ValueError("Delivery requires the exact discovered Desktop owner")
+    target = owner["handled_by_client_id"]
+    try:
+        client = _Client(socket_path, timeout)
+    except (OSError, CodexWakeError) as exc:
+        raise OwnerUnavailable(str(exc)) from exc
+    message_id = str(uuid.uuid4())
+    inputs = [{"type": "text", "text": prompt, "text_elements": []}]
+    restore = {"id": message_id, "text": prompt, "context": {}}
+    dispatched = False
+    try:
+        client.initialize()
+        # Revalidate on this connection; never redirect a stale owner silently.
+        discovery = client.request("thread-owner-discovery",
+            {"hostId": "local", "conversationId": thread_id}, version=1,
+            target_client_id=target)
+        if (discovery.get("handledByClientId") != target or
+                not isinstance(discovery.get("result"), dict) or
+                discovery["result"].get("supportsUntrustedAppInput") is not True):
+            raise OwnerUnavailable("Exact Codex owner changed or is unsupported")
+        phase = "steered"
+        dispatched = True
+        try:
+            response = client.request("thread-follower-steer-turn", {
+                "conversationId": thread_id, "input": inputs,
+                "restoreMessage": restore, "clientUserMessageId": message_id,
+                "attachments": [],
+            }, version=1, target_client_id=target)
+        except IPCRejected as exc:
+            # This owner-side error precedes submission. All other errors retain
+            # their uncertainty; in particular a timeout must never start a turn.
+            if exc.error != (f"Cannot steer conversation {thread_id} because "
+                             "its active turn already ended"):
+                raise
+            phase = "started"
+            response = client.request("thread-follower-start-turn", {
+                "conversationId": thread_id,
+                "turnStart": {
+                    "request": {"threadId": thread_id, "input": inputs,
+                                "clientUserMessageId": message_id},
+                    "context": {"inheritThreadSettings": True,
+                                "restoreMessage": restore},
+                },
+            }, version=2, target_client_id=target)
+        result = response.get("result")
+        result = result.get("result") if isinstance(result, dict) else None
+        if phase == "started":
+            # startTurn returns the raw TurnStartResponse; unlike steerTurn,
+            # its exact turn receipt is nested in result.turn.id.
+            turn = result.get("turn") if isinstance(result, dict) else None
+            receipt = turn.get("id") if isinstance(turn, dict) else None
+            try:
+                if not isinstance(receipt, str) or str(uuid.UUID(receipt)) != receipt:
+                    raise ValueError("Invalid canonical turn UUID")
+            except (ValueError, AttributeError) as exc:
+                raise DeliveryUncertain("Codex start response has no exact turn UUID") from exc
+        else:
+            receipt = result.get("turnId") if isinstance(result, dict) else result
+            if not isinstance(receipt, str) or not receipt:
+                raise DeliveryUncertain("Codex delivery response has no turn receipt")
+        return {"phase": phase, "receipt": receipt, "thread_id": thread_id,
+                "client_user_message_id": message_id}
+    except OwnerUnavailable:
+        raise
+    except IPCRejected as exc:
+        if exc.error in ("no-client-found", "request-version-mismatch"):
+            raise OwnerUnavailable(str(exc)) from exc
+        raise DeliveryUncertain(str(exc)) from exc
+    except CodexWakeError as exc:
+        if not dispatched:
+            raise OwnerUnavailable(str(exc)) from exc
+        raise DeliveryUncertain(str(exc)) from exc
     finally:
         client.close()

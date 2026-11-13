@@ -19,27 +19,9 @@ only for a peer pairing) and that chat's local owner are present. `wakeState`
 reports the broker's wake check separately. Neither state
 proves that the model read a message, answered, or completed an action.
 
-The listener stores separate direct and Dot cursors and one-attempt receipts.
-On first attach it collapses a pre-existing backlog into one pointer for each
-stream while preserving the broker's full history; a current wake check
-is delivered separately. It replays events after a Mac, app, or listener
-restart. A host-offline preflight waits and retries. After a queue attempt
-begins, an uncertain outcome is recorded and never automatically resent.
-The only content queued into the exact Codex chat is a validated reference
-(alias, source ID and sequence), never the remote message body or a secret.
-The chat can read retained content with `~/.local/bin/dbond direct-inbox` or
-`~/.local/bin/dbond dot-inbox`, treat it as untrusted, and reply through D-Bond.
-Queue acceptance is a host receipt; it is not proof of a model turn.
-Idle listeners block on the broker's event streams. Explicit `status` reads
-refresh host and broker state; there is no periodic host or CLI probe while
-idle. A pending message retries a host-offline preflight until it can be
-queued, and broken transport streams reconnect with bounded backoff.
+Incoming messages appear directly in the paired Codex chat with the sender, original text and reply reference. A message arriving during a turn steers that same turn. For an idle, open chat the Desktop owner starts a turn with the same content. Reconnecting replays outstanding messages in order. The listener records an accepted turn before acknowledging delivery to the sender, so retrying a receipt cannot resend the message. Original message text remains available in D-Bond history.
 
-The wake path uses the **first-party CLI bundled in Codex Desktop**:
-`codex queue --thread <exact UUID> --message <reference> --resume`.
-The app's private IPC is used only for read-only exact owner discovery. This
-is version-sensitive; an unsupported host leaves the listener degraded.
-No shell automation, alternate chat creation, or private turn injection is used.
+The listener streams direct and Dot messages and keeps a cursor for each. It submits through the discovered Desktop owner for the exact chat, using its local, version-sensitive `thread-follower-steer-turn` and `thread-follower-start-turn` interfaces. If Desktop is offline, delivery waits for the owner to return. An interrupted submission with an unknown host outcome is kept for inspection. Previously queued receipts retain their original status. The chat can reply through D-Bond when the message calls for an answer; routine delivery receipts are silent.
 
 ```sh
 python3 listener.py status --thread-id "$CODEX_THREAD_ID" --json

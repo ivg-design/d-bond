@@ -80,7 +80,7 @@ final class EventLogWindow: NSObject, NSWindowDelegate {
         let header = NSStackView(views:[icon,heading])
         header.orientation = .horizontal; header.alignment = .centerY; header.spacing = 12
         let explanation = NSTextField(wrappingLabelWithString:
-            "Times are local to this Mac, shown to the second. A direct message stored for a recipient has not necessarily been read by an agent.")
+            "Times are local to this Mac.")
         explanation.font = .systemFont(ofSize:12)
         explanation.textColor = .secondaryLabelColor
         scope.font = .systemFont(ofSize:13,weight:.semibold)
@@ -219,7 +219,10 @@ final class EventLogWindow: NSObject, NSWindowDelegate {
                 let stages = trace.stages.isEmpty ? "  No stage history recorded" : trace.stages.map {
                     let state:String
                     switch $0.state {
-                    case "peer_delivered": state = "Stored for recipient · agent read unconfirmed"
+                    case "peer_delivered": state = "Queued for recipient"
+                    case "peer_unconfirmed": state = "Delivery unconfirmed"
+                    case "peer_received": state = "Received"
+                    case "peer_acknowledged": state = "Acknowledged"
                     case "wake_pending" where trace.wakeCheck == true: state = "Wake check stored for recipient"
                     case "wake_verified" where trace.wakeCheck == true: state = "Authenticated connection acknowledged wake check · AI turn unconfirmed"
                     default: state = $0.state

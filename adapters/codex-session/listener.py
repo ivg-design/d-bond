@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Opt-in, Mac-local D-Bond listener for one existing Codex Desktop chat.
 
-Transport receipt, first-party CLI queue, and agent answer are distinct.
+Receives messages over SSE and submits the full text to the bound chat.
 """
 from __future__ import annotations
 
@@ -169,52 +169,99 @@ def receipt_file(directory: Path, event: dict, lane: str = "direct") -> Path:
     return directory / f"{lane}-{event['sequence']}.json"
 
 
+def submit_message(cli: Path | None, thread: str, prompt: str, thread_owner: dict, *,
+                   timeout: float = 20) -> dict:
+    return ipc.deliver_to_owner(thread, prompt, thread_owner, timeout=timeout)
+
+
+def acknowledge_host(bound: dict, event: dict) -> None:
+    pair, service = pairing_service(bound["alias"])
+    if event["to"] != service or bound["service_id"] != service:
+        raise ValueError("Receipt pairing changed")
+    result = dbond.direct_delivery_receipt(pair, event, adapter="codex-session",
+                                           state="acknowledged", basis="host_acceptance")
+    if result.get("state") == "receipt_queued":
+        raise OSError("Broker receipt pending")
+
+
+def report_host_unconfirmed(bound: dict, event: dict) -> None:
+    pair, service = pairing_service(bound["alias"])
+    if event["to"] != service or bound["service_id"] != service:
+        raise ValueError("Receipt pairing changed")
+    result = dbond.direct_delivery_receipt(pair, event, adapter="codex-session",
+                                           state="unconfirmed", basis="host_result_unknown")
+    if result.get("state") == "receipt_queued":
+        raise OSError("Broker receipt pending")
+
+
 def process_event(event: dict, bound: dict, folder: dict, lane: str = "direct",
-                  submit=host_queue.enqueue, discover=ipc.discover_owner,
-                  cli: Path | None = None, first_after: int | None = None) -> str:
-    """At most one host submission attempt per event, including after a crash."""
+                  submit=submit_message, discover=ipc.discover_owner,
+                  cli: Path | None = None, retained: bool = False,
+                  acknowledge=acknowledge_host,
+                  report_unconfirmed=report_host_unconfirmed) -> str:
+    """Persist the host's receipt before notifying the sender or advancing the stream."""
     cursor_path = folder["cursor_direct"] if lane == "direct" else folder["cursor_dot"]
     receipt = receipt_file(folder["receipts"], event, lane)
     try:
-        prior = private_json(receipt)
-        if prior.get("event_id") != event["id"]:
+        record = private_json(receipt)
+        if record.get("event_id") != event["id"]:
             raise ValueError("Broker sequence identity changed")
-        phase = prior.get("phase")
-        if phase in ("sending", "queued_unverified", "ambiguous"):
-            if phase == "sending":
-                save_json(receipt, {**prior, "phase": "ambiguous"})
+        if record["phase"] == "sending":
+            record["phase"] = "ambiguous"
+            if lane == "direct" and event["from"] != "owner":
+                record["unconfirmed_pending"] = True
+            save_json(receipt, record)
+        if (not record.get("ack_pending") and not record.get("unconfirmed_pending")
+                and record["phase"] != "ready"):
             advance(cursor_path, event["sequence"])
             return "already_attempted"
-        if phase != "ready":
-            raise ValueError("Invalid listener receipt phase")
     except FileNotFoundError:
-        prior = {"event_id": event["id"], "sequence": event["sequence"], "lane": lane,
-                 "phase": "ready"}
-        save_json(receipt, prior)
-    try:
-        discover(bound["thread_id"], timeout=5)
-    except (ipc.CodexWakeError, FileNotFoundError, ConnectionRefusedError):
-        return "owner_offline"
-    try:
-        selected_cli = cli or host_queue.find_cli()
-        if cli is None:
-            host_queue.verify_cli(selected_cli)
-    except (OSError, RuntimeError):
-        return "cli_unavailable"
-    # After this durable marker, *all* failures are uncertain. Never retry a
-    # potentially delivered turn, even if a later socket response times out.
-    save_json(receipt, {**prior, "phase": "sending"})
-    try:
-        queued = submit(selected_cli, bound["thread_id"], bound["alias"],
-                        lane, event["sequence"], event["id"], timeout=20,
-                        first_after=first_after)
-        phase = "queued_unverified"
-        save_json(receipt, {**prior, "phase": phase, "queue_id": queued})
-    except Exception:
-        save_json(receipt, {**prior, "phase": "ambiguous"})
-        phase = "ambiguous"
+        record = {"event_id": event["id"], "sequence": event["sequence"], "lane": lane, "phase": "ready"}
+        save_json(receipt, record)
+
+    if record["phase"] == "ready":
+        try:
+            thread_owner = discover(bound["thread_id"], timeout=5)
+        except (ipc.CodexWakeError, OSError):
+            return "owner_offline"
+        prompt = host_queue.inline_message(bound["alias"], lane, event, retained=retained,
+                                           sender_name=event.get("sender_name"))
+        save_json(receipt, {**record, "phase": "sending"})
+        try:
+            outcome = submit(cli, bound["thread_id"], prompt, thread_owner, timeout=20)
+        except ipc.OwnerUnavailable:
+            # Owner discovery failed before any host turn could be submitted.
+            save_json(receipt, record)
+            return "owner_offline"
+        except Exception:
+            outcome = {"phase": "ambiguous"}
+        record.update(outcome)
+        if (outcome["phase"] in ("steered", "started") and lane == "direct"
+                and event["from"] != "owner"):
+            record["ack_pending"] = True
+        elif (outcome["phase"] == "ambiguous" and lane == "direct"
+                and event["from"] != "owner"):
+            record["unconfirmed_pending"] = True
+        save_json(receipt, record)
+
+    if record.get("ack_pending"):
+        try:
+            acknowledge(bound, event)
+        except (OSError, ValueError, SystemExit, RuntimeError):
+            # Retry only the idempotent receipt. The accepted host turn is already durable.
+            return "receipt_pending"
+        record["ack_pending"] = False
+        save_json(receipt, record)
+    if record.get("unconfirmed_pending"):
+        try:
+            report_unconfirmed(bound, event)
+        except (OSError, ValueError, SystemExit, RuntimeError):
+            # Retry metadata only. An unknown host result cannot be resubmitted.
+            return "receipt_pending"
+        record["unconfirmed_pending"] = False
+        save_json(receipt, record)
     advance(cursor_path, event["sequence"])
-    return phase
+    return record["phase"]
 
 
 class StatusServer:
@@ -325,12 +372,11 @@ def refreshed_status(thread: str, value: dict) -> dict:
     """Explicit read-only host and broker check; never runs on idle timers."""
     try:
         ipc.discover_owner(thread, timeout=3)
-        host_queue.verify_cli(host_queue.find_cli())
         host = "owner_available"
     except ipc.CodexWakeError:
         host = "owner_offline"
     except (OSError, RuntimeError):
-        host = "queue_unavailable"
+        host = "owner_offline"
     value["host"] = host
     try:
         observed = dbond.session_status(binding(thread)["alias"])
@@ -348,7 +394,7 @@ def refreshed_status(thread: str, value: dict) -> dict:
 
 
 def snapshot_highwater(pair: dict, lane: str, after: int) -> int:
-    """Read existing retained rows once to collapse only the initial backlog."""
+    """Find the first-attach boundary so retained messages can be labelled."""
     direct = lane == "direct"
     if direct:
         code, body = dbond._request(pair, "GET", dbond._direct_url(pair) + "/head", timeout=5)
@@ -378,7 +424,8 @@ def snapshot_highwater(pair: dict, lane: str, after: int) -> int:
 
 def normalized(row: dict, service: str) -> dict:
     return {"id": row["source_id"], "sequence": row["sequence"],
-            "from": row.get("sender_id", "dot"), "to": service, "text": row["text"]}
+            "from": row.get("sender_id", "dot"), "to": service, "text": row["text"],
+            "in_reply_to": row.get("in_reply_to")}
 
 
 def current_wake_unverified(service: str, source_id: str) -> bool:
@@ -390,24 +437,21 @@ def current_wake_unverified(service: str, source_id: str) -> bool:
 
 
 def deliver(event: dict, bound: dict, folder: dict, lane: str, server: StatusServer,
-            *, first_after: int | None = None) -> str:
-    outcome = process_event(event, bound, folder, lane, first_after=first_after)
-    if outcome in ("owner_offline", "cli_unavailable"):
-        server.update(state="degraded", host="owner_offline" if outcome == "owner_offline" else "queue_unavailable",
-                      reason=outcome)
-        while not EXIT.wait(3):
-            try:
-                ipc.discover_owner(bound["thread_id"], timeout=3)
-                outcome = process_event(event, bound, folder, lane, first_after=first_after)
-                if outcome not in ("owner_offline", "cli_unavailable"):
-                    server.update(state="listening", host="owner_available", reason=None)
-                    break
-            except ipc.CodexWakeError:
-                pass
-    if outcome == "queued_unverified":
-        server.update(host="owner_available", reason=None, wake="host_queue_unverified")
+            *, retained: bool = False) -> str:
+    while not EXIT.is_set():
+        outcome = process_event(event, bound, folder, lane, retained=retained)
+        if outcome not in ("owner_offline", "receipt_pending"):
+            break
+        server.update(reason=outcome, host="owner_offline" if outcome == "owner_offline" else "owner_available",
+                      state="degraded")
+        if EXIT.wait(3):
+            return outcome
+    else:
+        return "stopped"
+    if outcome in ("steered", "started", "already_attempted"):
+        server.update(state="listening", host="owner_available", reason=None)
     elif outcome == "ambiguous":
-        server.update(host="unknown", reason="queue_result_ambiguous", wake="queue_result_ambiguous")
+        server.update(host="unknown", reason="host_delivery_uncertain")
     try:
         observed = dbond.session_status(bound["alias"])
         server.update(wakeState=observed.get("wakeState", "unknown"),
@@ -445,8 +489,6 @@ def lane_loop(lane: str, bound: dict, folder: dict, server: StatusServer,
                 streams[lane] = stream
             server.stream(lane, True)
             delay = 0.5
-            batch: dict | None = None
-            first_after = current
             while not EXIT.is_set():
                 event = stream.next_event()
                 if event is None:
@@ -457,29 +499,23 @@ def lane_loop(lane: str, bound: dict, folder: dict, server: StatusServer,
                 row = dbond._session_row(event, direct=direct, alias=bound["alias"],
                                          service_id=bound["service_id"], cursor=current)
                 current = seq
-                item = normalized(row, bound["service_id"]) if row is not None else None
-                preexisting = seq <= preexisting_max
-                wake = direct and item is not None and item["id"].startswith("@wake:")
-                if batch is not None and (not preexisting or wake):
-                    synthetic = {"id": f"batch-{first_after + 1}-{batch['sequence']}",
-                                 "sequence": batch["sequence"]}
-                    deliver(synthetic, bound, folder, lane, server, first_after=first_after)
-                    batch = None
-                if wake and preexisting and not current_wake_unverified(bound["service_id"], item["id"]):
+                if row is None:
                     advance(cursor_path, seq)
-                elif item is not None and preexisting and not wake:
-                    if batch is None:
-                        first_after = cursor(cursor_path)
-                    batch = item
-                elif item is not None:
-                    deliver(item, bound, folder, lane, server)
-                elif batch is None:
+                    continue
+                item = normalized(row, bound["service_id"])
+                wake = direct and item["from"] == "owner" and item["id"].startswith("@wake:")
+                retained = seq <= preexisting_max
+                if wake and retained and not current_wake_unverified(bound["service_id"], item["id"]):
                     advance(cursor_path, seq)
-                if batch is not None and seq == preexisting_max:
-                    synthetic = {"id": f"batch-{first_after + 1}-{batch['sequence']}",
-                                 "sequence": batch["sequence"]}
-                    deliver(synthetic, bound, folder, lane, server, first_after=first_after)
-                    batch = None
+                    continue
+                if direct and item["from"] != "owner":
+                    try:
+                        peers = dbond._direct_peers(pair)
+                        item["sender_name"] = next((peer["name"] for peer in peers
+                                                    if peer.get("id") == item["from"]), None)
+                    except (OSError, ValueError, SystemExit):
+                        pass  # Stable sender ID remains available for addressing replies.
+                deliver(item, bound, folder, lane, server, retained=retained and not wake)
         except (OSError, ConnectionError):
             server.stream(lane, False)
             if not EXIT.wait(delay):
@@ -566,7 +602,6 @@ def install(thread: str, alias: str) -> dict:
         raise ValueError("Custom alias requires the exact active Codex chat")
     verify_pairing(alias, service)
     ipc.discover_owner(thread, timeout=5)
-    host_queue.verify_cli(host_queue.find_cli())
     private_dir(folder["dir"])
     if not prior:
         save_json(folder["binding"], {"thread_id": thread, "alias": alias, "service_id": service})

@@ -168,3 +168,15 @@ python3 -m unittest adapters.cli.test_dbond -v
 # Local event traces
 
 Use `dbond trace <connection-uuid> [event-id]` to read recent traces from the running Mac app. Add `--limit 1` to inspect only the newest event. Displayed times use the Mac’s current timezone and omit fractions of a second; the stored ledger and owner-socket protocol keep precise UTC timestamps. Existing whole-second timestamps are supported.
+
+## Automatic direct delivery receipts
+
+`direct-send` and `direct-answer` perform one authenticated, event-driven acknowledgment wait, up to 10 seconds by default. Use `--wait-ms 0` for an immediate lookup or a bounded value up to 60000. The compact result is `queued`, `received`, or `acknowledged`; `delivery_status:unconfirmed` means the status lookup failed after the broker stored the message. Reuse the same message ID and content when reconciling an uncertain send. `direct-status ALIAS MESSAGE_ID SEQUENCE` checks the existing send without posting another message.
+
+The foreground direct listener and host Monitor automatically record `received` with `basis:host_acceptance` after flushing output. That proves adapter receipt, not model access. When the agent actually processes the message, it silently calls `acknowledge_direct_message` through MCP, or `dbond direct-ack ALIAS SENDER_ID SOURCE_ID SEQUENCE`. A proven host submission can also acknowledge with `basis:host_acceptance`; `basis:participant` specifically records a model-facing access. An authenticated content reply acknowledges with `basis:connection_reply` and remains separate from these metadata-only receipts.
+
+Successful transport bookkeeping needs no human-facing report and no content reply. Report issues; otherwise continue ordinary conversation. Receipt failures are retained as owner-only metadata in `.receipt-*.json` files beside pairings and retried by active listeners. They contain no message text or pairing credential, do not advance message sequences, and never trigger a message/ACK reply loop.
+
+Receipt retries now register a macOS kqueue directory watcher before the startup recovery scan. With no pending receipt they block indefinitely; queued metadata wakes them across processes or through an in-process signal. A stop event wakes and shuts down the worker. Retry delays increase from 1 to at most 30 seconds only while that exact pairing has pending receipts. Non-macOS hosts retain startup recovery and exact-listener in-process ownership.
+
+`dbond direct-receipts ALIAS --after RECEIPT_SEQUENCE` explicitly subscribes to sender-only authenticated receipt metadata over SSE. This independent cursor is `receipt_sequence`, not the original message sequence. The output contains no message text and must never be connected to an agent chat or a wake pipeline; it is for transport bookkeeping. `direct-status` remains a concise on-demand lookup. An attempted host submission whose result is unknown can report `unconfirmed/host_result_unknown`; ordinary offline messages remain queued.
