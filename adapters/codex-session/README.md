@@ -10,6 +10,12 @@ python3 listener.py install --thread-id "$CODEX_THREAD_ID" \
   --alias "codex-$CODEX_THREAD_ID" --json
 ```
 
+The installer discovers the exact chat on the local and durable Codex Desktop hosts.
+A Dot-created chat with Mac access can have a durable owner. The saved binding
+records its host and chat UUID. Delivery rechecks the current owner on that host
+after a restart. A first attachment skips peer replies this recipient already
+read or answered and delivers outstanding messages in order.
+
 The installer verifies the pairing and exact chat owner, writes an owner-only
 binding with no bearer, installs a per-chat launchd agent, and waits for the
 listener's status socket. The socket lives in a short owner-only `/tmp` directory

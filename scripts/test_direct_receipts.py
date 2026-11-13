@@ -18,11 +18,11 @@ def status(pair, message, **options):
     return call(pair, "/status?" + urlencode(query))
 
 
-def open_receipts(pair, after):
+def open_receipts(pair, after, *, lane="receipts-stream"):
     parsed=urllib.parse.urlparse(pair["endpoint"])
     sock=socket.create_connection((parsed.hostname,parsed.port),timeout=3)
     reader=sock.makefile("rb")
-    path=parsed.path.removesuffix("/events") + "/messages/receipts-stream?after=" + str(after)
+    path=parsed.path.removesuffix("/events") + "/messages/" + lane + "?after=" + str(after)
     sock.sendall((f"GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{parsed.port}\r\n"
                   f"Authorization: Bearer {pair['secret']}\r\nAccept: text/event-stream\r\n\r\n").encode())
     assert b"200" in reader.readline()
@@ -44,6 +44,15 @@ def read_receipt(reader):
     return row
 
 
+def read_message(reader):
+    cursor = reader.readline()
+    assert cursor.startswith(b"id: ")
+    row = json.loads(reader.readline().removeprefix(b"data: "))
+    assert row["sequence"] == int(cursor[4:])
+    assert reader.readline() == b"\n"
+    return row
+
+
 def run():
     with tempfile.TemporaryDirectory() as folder:
         store = pathlib.Path(folder)
@@ -58,6 +67,7 @@ def run():
         # Merely consuming a stored inbound frame also must not invent host acceptance.
         inbox = call(recipient, "?after=0")[1]["messages"]
         assert inbox[0]["sequence"] == message["sequence"]
+        assert inbox[0]["recipient_consumed"] is False
         assert status(sender, message)[1]["state"] == "pending"
         body = {"from":sender["id"], "id":message["id"], "sequence":message["sequence"],
                 "state":"received", "adapter":"fixture_host", "basis":"host_acceptance"}
@@ -95,6 +105,7 @@ def run():
         assert acknowledged[0] == 200 and completed[1]["satisfied"] is True
         assert completed[1]["basis"] == "host_acceptance"
         assert completed[1]["state"] == "acknowledged"
+        assert call(recipient, "?after=0")[1]["messages"][0]["recipient_consumed"] is False, "host ACK does not prove explicit handling"
         assert status(sender, message, condition="received")[1]["satisfied"] is True
         participant = call(recipient, "/receipt", {**body, "state":"acknowledged", "basis":"participant"})[1]
         assert participant["status"]["basis"] == "participant" and len(participant["status"]["receipts"]) == 3
@@ -106,12 +117,15 @@ def run():
         assert trace["deliveryMeaning"]
         assert trace["brokerSequence"] == message["sequence"], "receipts never move inbound message cursor"
         # No receipt is ever delivered as an ordinary inbound message.
-        assert call(recipient, "?after=0")[1]["messages"] == inbox
+        assert call(recipient, "?after=0")[1]["messages"] == [{**inbox[0], "recipient_consumed": True}]
         # Authenticated correlated reply acknowledges connection handling, without claiming model observation.
         original = call(sender, body={"id":"reply-proof", "to":recipient["id"], "text":"reply please"})[1]
         answer = call(recipient, body={"id":"actual-answer", "to":sender["id"], "text":"answer", "in_reply_to":"reply-proof"})[1]
         reply_status = status(sender, original)[1]
         assert reply_status["basis"] == "connection_reply" and reply_status["satisfied"] is True
+        consumed_rows = call(recipient, "?after=0")[1]["messages"]
+        assert next(row for row in consumed_rows if row["id"] == original["id"])["recipient_consumed"] is True
+        assert call(sender, "?after=0")[1]["messages"][0]["recipient_consumed"] is False, "reply consumption is not inherited by the reverse message"
         assert call(recipient, body={"id":"actual-answer", "to":sender["id"], "text":"answer", "in_reply_to":"reply-proof"})[1]["sequence"] == answer["sequence"]
         assert len(status(sender, original)[1]["receipts"]) == 1
         call(recipient, body={"id":"stronger-answer", "to":sender["id"], "text":"answered", "in_reply_to":message["id"]})
@@ -121,6 +135,12 @@ def run():
         call(recipient, "/receipt", {**body, "id":host_only["id"], "sequence":host_only["sequence"], "state":"acknowledged"})
         host_trace = command(proc, 'json ' + json.dumps({"op":"trace", "id":sender["id"], "eventID":"host-only"}))["event"]
         assert host_trace["deliveryMeaning"] == "Acknowledged by fixture_host."
+        consumed_rows = call(recipient, "?after=0")[1]["messages"]
+        assert next(row for row in consumed_rows if row["id"] == host_only["id"])["recipient_consumed"] is False
+        message_stream, message_reader = open_receipts(recipient, 0, lane="stream")
+        streamed = [read_message(message_reader) for _ in consumed_rows]
+        message_reader.close(); message_stream.close()
+        assert streamed == consumed_rows, "direct SSE carries exact recipient handling evidence without hiding history"
         # A separate sender metadata SSE remains open after ordinary status times out.
         cursor=max(row["receipt_sequence"] for row in status(sender, host_only)[1]["receipts"])
         late=call(sender,body={"id":"late-stream", "to":recipient["id"], "text":"late host acceptance"})[1]
@@ -163,6 +183,7 @@ def run():
         for pair in (sender, recipient, other):
             pair["endpoint"] = base + "/v1/services/" + pair["id"] + "/events"
         assert status(sender, message)[1] == preserved
+        assert next(row for row in call(recipient, "?after=0")[1]["messages"] if row["id"] == message["id"])["recipient_consumed"] is True, "explicit handling survives restart"
         replay_stream,replay_reader=open_receipts(sender,received["receipt_sequence"])
         assert read_receipt(replay_reader) == stronger, "receipt SSE resumes after restart with original timestamp"
         replay_reader.close();replay_stream.close()

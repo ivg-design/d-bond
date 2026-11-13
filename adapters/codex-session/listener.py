@@ -132,6 +132,10 @@ def binding(thread: str) -> dict:
     item = private_json(paths(thread)["binding"])
     if item.get("thread_id") != identity(thread) or not isinstance(item.get("alias"), str) or not UUID.fullmatch(item.get("service_id", "")):
         raise ValueError("Invalid Codex listener binding")
+    # Bindings created before host-aware routing were verified exclusively on local.
+    item.setdefault("host_id", "local")
+    if item["host_id"] not in ("local", "durable"):
+        raise ValueError("Invalid Codex listener host")
     return item
 
 
@@ -221,7 +225,7 @@ def process_event(event: dict, bound: dict, folder: dict, lane: str = "direct",
 
     if record["phase"] == "ready":
         try:
-            thread_owner = discover(bound["thread_id"], timeout=5)
+            thread_owner = discover(bound["thread_id"], host_id=bound["host_id"], timeout=5)
         except (ipc.CodexWakeError, OSError):
             return "owner_offline"
         prompt = host_queue.inline_message(bound["alias"], lane, event, retained=retained,
@@ -370,16 +374,16 @@ def status(thread: str, *, refresh: bool = False) -> dict:
 
 def refreshed_status(thread: str, value: dict) -> dict:
     """Explicit read-only host and broker check; never runs on idle timers."""
+    bound = binding(thread)
+    value["host_id"] = bound["host_id"]
     try:
-        ipc.discover_owner(thread, timeout=3)
+        ipc.discover_owner(thread, host_id=bound["host_id"], timeout=3)
         host = "owner_available"
-    except ipc.CodexWakeError:
-        host = "owner_offline"
-    except (OSError, RuntimeError):
+    except (ipc.CodexWakeError, OSError):
         host = "owner_offline"
     value["host"] = host
     try:
-        observed = dbond.session_status(binding(thread)["alias"])
+        observed = dbond.session_status(bound["alias"])
         value["wakeState"] = observed.get("wakeState", "unknown")
         value["lastVerifiedAt"] = observed.get("lastWakeVerifiedAt")
         broker_ready = observed.get("state") == "subscriber_present"
@@ -499,6 +503,11 @@ def lane_loop(lane: str, bound: dict, folder: dict, server: StatusServer,
                 row = dbond._session_row(event, direct=direct, alias=bound["alias"],
                                          service_id=bound["service_id"], cursor=current)
                 current = seq
+                # This exact paired recipient already handled the message explicitly.
+                # Keep broker history intact; skip only Codex host reinjection.
+                if direct and event.get("recipient_consumed") is True:
+                    advance(cursor_path, seq)
+                    continue
                 if row is None:
                     advance(cursor_path, seq)
                     continue
@@ -542,6 +551,7 @@ def run(thread: str) -> dict:
     required = ["direct"] if pair["_destination"] == "peer" else ["direct", "dot"]
     server = StatusServer(folder["socket"], thread, bound["service_id"], required,
                           folder["health"])
+    server.update(host_id=bound["host_id"])
     streams: dict[str, dbond.Stream] = {}
     stream_lock = threading.Lock()
     def stop(*_):
@@ -554,7 +564,7 @@ def run(thread: str) -> dict:
     signal.signal(signal.SIGINT, stop)
     try:
         try:
-            ipc.discover_owner(thread, timeout=3)
+            ipc.discover_owner(thread, host_id=bound["host_id"], timeout=3)
             server.update(host="owner_available")
         except ipc.CodexWakeError:
             server.update(host="owner_offline")
@@ -592,7 +602,7 @@ def install(thread: str, alias: str) -> dict:
         raise ValueError("Invalid pairing alias")
     pair, service = pairing_service(alias)
     folder = paths(thread)
-    prior = private_json(folder["binding"]) if folder["binding"].exists() else None
+    prior = binding(thread) if folder["binding"].exists() else None
     if prior and (prior.get("thread_id"), prior.get("alias"), prior.get("service_id")) != (thread, alias, service):
         raise ValueError("Existing listener binding differs; stop and review it first")
     if not prior and (folder["cursor_direct"].exists() or folder["cursor_dot"].exists()
@@ -601,10 +611,16 @@ def install(thread: str, alias: str) -> dict:
     if not prior and alias != f"codex-{thread}" and os.environ.get("CODEX_THREAD_ID") != thread:
         raise ValueError("Custom alias requires the exact active Codex chat")
     verify_pairing(alias, service)
-    ipc.discover_owner(thread, timeout=5)
+    # Resolve both Desktop hosts on first attach. Reuse this route after restarts,
+    # rediscovering the current owner client on that host for every delivery.
+    try:
+        thread_owner = ipc.discover_owner(thread, host_id=prior["host_id"] if prior else None, timeout=5)
+    except ipc.CodexWakeError as exc:
+        return {"state": "blocked", "reason": str(exc), "thread_id": thread, "ready": False}
     private_dir(folder["dir"])
     if not prior:
-        save_json(folder["binding"], {"thread_id": thread, "alias": alias, "service_id": service})
+        save_json(folder["binding"], {"thread_id": thread, "alias": alias, "service_id": service,
+                                      "host_id": thread_owner["host_id"]})
     AGENTS_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
     agent_info = AGENTS_DIR.lstat()
     if not stat.S_ISDIR(agent_info.st_mode) or agent_info.st_uid != os.getuid():

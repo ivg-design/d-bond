@@ -715,7 +715,8 @@ public final class Hub: @unchecked Sendable {
                     .sorted { ($0.sequence ?? 0) < ($1.sequence ?? 0) }.prefix(64).compactMap { event in
                         guard let body = try? JSONSerialization.jsonObject(with:event.payload) as? [String:Any] else { return nil }
                         return ["id":event.id,"from":event.service,"to":sender.id,"text":body["text"] ?? "",
-                                "in_reply_to":body["in_reply_to"] ?? NSNull(),"sequence":event.sequence ?? 0]
+                                "in_reply_to":body["in_reply_to"] ?? NSNull(),"sequence":event.sequence ?? 0,
+                                "recipient_consumed":recipientConsumed(event, recipient:sender.id)]
                     }
             }
             let until = Date().addingTimeInterval(12)
@@ -889,6 +890,14 @@ public final class Hub: @unchecked Sendable {
             ? "Acknowledged by " + strongest.adapter + "."
             : "Received by " + strongest.adapter + "."
     }
+    /// Explicit handling evidence only; automatic host acceptance is insufficient.
+    private func recipientConsumed(_ event:Event, recipient:String) -> Bool {
+        (ledger.directReceipts ?? []).contains {
+            $0.from == event.service && $0.to == recipient && $0.id == event.id &&
+            $0.sequence == event.sequence && $0.state == "acknowledged" &&
+            ["participant", "connection_reply"].contains($0.basis)
+        }
+    }
     private func directStream(service:String, after:Int, write:(Data)->Bool) {
         lock.lock()
         directSubscribers[service,default:0] += 1
@@ -916,11 +925,13 @@ public final class Hub: @unchecked Sendable {
                 let active = ledger.services.contains(where: { $0.id == service && $0.paused != true })
                 let inactive = ledger.events.contains { $0.service == row.service && $0.id == row.id &&
                     $0.route == row.route && Self.inactiveWake($0) }
+                let consumed = recipientConsumed(row, recipient:service)
                 lock.unlock()
                 if inactive { cursor=row.sequence ?? cursor; continue }
                 guard active, let body = try? JSONSerialization.jsonObject(with:row.payload) as? [String:Any] else { return }
                 let value:[String:Any] = ["id":row.id,"from":row.service,"to":service,"text":body["text"] ?? "",
-                                          "in_reply_to":body["in_reply_to"] ?? NSNull(),"sequence":row.sequence ?? 0]
+                                          "in_reply_to":body["in_reply_to"] ?? NSNull(),"sequence":row.sequence ?? 0,
+                                          "recipient_consumed":consumed]
                 guard let json = try? JSONSerialization.data(withJSONObject:value) else { return }
                 var frame=Data("id: \(row.sequence ?? 0)\ndata: ".utf8)
                 frame.append(json);frame.append(Data("\n\n".utf8))

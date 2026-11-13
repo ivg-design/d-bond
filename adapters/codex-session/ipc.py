@@ -18,6 +18,7 @@ import stat
 import struct
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -133,6 +134,7 @@ class _Client:
         version: int,
         *,
         target_client_id: str | None = None,
+        host_id: str | None = None,
     ) -> dict[str, Any]:
         self._deadline = time.monotonic() + self.timeout
         request_id = str(uuid.uuid4())
@@ -147,6 +149,8 @@ class _Client:
         }
         if target_client_id is not None:
             request["targetClientId"] = target_client_id
+        if host_id is not None:
+            request["hostId"] = host_id
         self._send_frame(request)
         while True:
             response = self._read_frame()
@@ -179,7 +183,7 @@ class _Client:
 
 
 class OwnerUnavailable(CodexWakeError):
-    """Exact thread has no local owner; no start-turn was submitted."""
+    """Exact thread has no safely resolved owner; no turn was submitted."""
 
 
 def handshake(*, timeout: float = DEFAULT_TIMEOUT, socket_path: Path = SOCKET_PATH) -> dict[str, str]:
@@ -191,32 +195,63 @@ def handshake(*, timeout: float = DEFAULT_TIMEOUT, socket_path: Path = SOCKET_PA
         client.close()
 
 
-def discover_owner(thread_id: str, *, timeout: float = DEFAULT_TIMEOUT,
-                   socket_path: Path = SOCKET_PATH) -> dict[str, str | bool]:
-    """Read-only exact owner discovery. Missing owner is safe to retry later."""
-    thread_id = str(uuid.UUID(thread_id))
+def _discover_host(thread_id: str, host_id: str, timeout: float,
+                   socket_path: Path) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout
     client = _Client(socket_path, timeout)
     try:
         client.initialize()
-        try:
-            response = client.request("thread-owner-discovery",
-                {"hostId": "local", "conversationId": thread_id},
-                version=_THREAD_OWNER_DISCOVERY_VERSION)
-        except CodexWakeError as exc:
-            if "no-client-found" in str(exc):
-                raise OwnerUnavailable("Exact Codex thread has no local owner") from exc
-            raise
-        client_id = response.get("handledByClientId")
-        result = response.get("result")
-        supports_untrusted = result.get("supportsUntrustedAppInput") if isinstance(result, dict) else None
-        if not isinstance(client_id, str) or not client_id:
-            raise CodexWakeError("Codex owner discovery returned no handledByClientId")
-        if supports_untrusted is not True:
-            raise CodexWakeError("Codex owner does not support untrusted app input")
-        return {"thread_id": thread_id, "handled_by_client_id": client_id,
-                "supports_untrusted_app_input": True}
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise CodexWakeError("Codex owner discovery timed out")
+        client.timeout = remaining
+        return client.request("thread-owner-discovery",
+            {"hostId": host_id, "conversationId": thread_id},
+            version=_THREAD_OWNER_DISCOVERY_VERSION)
     finally:
         client.close()
+
+
+def discover_owner(thread_id: str, *, host_id: str | None = None,
+                   timeout: float = DEFAULT_TIMEOUT,
+                   socket_path: Path = SOCKET_PATH) -> dict[str, str | bool]:
+    """Find the exact UUID on local/durable, or recheck a known canonical host.
+
+    Unknown hosts are queried concurrently within one bounded discovery window.
+    No turn is submitted. A timeout or missing owner is safe to retry later.
+    Once discovered, persist host_id and pass it back to avoid cold-host waits.
+    """
+    thread_id = str(uuid.UUID(thread_id))
+    if host_id is not None and host_id not in ("local", "durable"):
+        raise ValueError("Unsupported Codex host_id")
+    if not 0 < timeout <= 30:
+        raise ValueError("timeout must be greater than 0 and at most 30 seconds")
+    hosts = (host_id,) if host_id is not None else ("local", "durable")
+    responses = []
+    failures = []
+    with ThreadPoolExecutor(max_workers=len(hosts)) as executor:
+        pending = [(host, executor.submit(_discover_host, thread_id, host,
+                                         timeout, socket_path)) for host in hosts]
+        for host, future in pending:
+            try:
+                response = future.result()
+            except (CodexWakeError, OSError) as exc:
+                failures.append(exc)
+                continue
+            client_id = response.get("handledByClientId")
+            if not isinstance(client_id, str) or not client_id:
+                raise CodexWakeError("Codex owner discovery returned no handledByClientId")
+            responses.append((host, client_id, response.get("result")))
+    if len(responses) > 1:
+        raise OwnerUnavailable("Exact Codex thread has ambiguous local/durable owners")
+    if not responses:
+        raise OwnerUnavailable("Exact Codex thread has no available owner on "
+                               + ", ".join(hosts)) from (failures[0] if failures else None)
+    host, client_id, result = responses[0]
+    if not isinstance(result, dict) or result.get("supportsUntrustedAppInput") is not True:
+        raise CodexWakeError("Codex owner does not support untrusted app input")
+    return {"thread_id": thread_id, "host_id": host,
+            "handled_by_client_id": client_id, "supports_untrusted_app_input": True}
 
 
 def deliver_to_owner(thread_id: str, prompt: str, owner: dict[str, Any], *,
@@ -237,6 +272,12 @@ def deliver_to_owner(thread_id: str, prompt: str, owner: dict[str, Any], *,
             not owner["handled_by_client_id"]):
         raise ValueError("Delivery requires the exact discovered Desktop owner")
     target = owner["handled_by_client_id"]
+    # Legacy owner dictionaries predate durable routing and denote local only.
+    host_id = owner.get("host_id", "local")
+    if host_id not in ("local", "durable"):
+        raise ValueError("Unsupported Codex owner host_id")
+    route = {"host_id": host_id} if host_id != "local" else {}
+    version_offset = int(host_id != "local")
     try:
         client = _Client(socket_path, timeout)
     except (OSError, CodexWakeError) as exc:
@@ -249,7 +290,7 @@ def deliver_to_owner(thread_id: str, prompt: str, owner: dict[str, Any], *,
         client.initialize()
         # Revalidate on this connection; never redirect a stale owner silently.
         discovery = client.request("thread-owner-discovery",
-            {"hostId": "local", "conversationId": thread_id}, version=1,
+            {"hostId": host_id, "conversationId": thread_id}, version=1,
             target_client_id=target)
         if (discovery.get("handledByClientId") != target or
                 not isinstance(discovery.get("result"), dict) or
@@ -262,7 +303,7 @@ def deliver_to_owner(thread_id: str, prompt: str, owner: dict[str, Any], *,
                 "conversationId": thread_id, "input": inputs,
                 "restoreMessage": restore, "clientUserMessageId": message_id,
                 "attachments": [],
-            }, version=1, target_client_id=target)
+            }, version=1 + version_offset, target_client_id=target, **route)
         except IPCRejected as exc:
             # This owner-side error precedes submission. All other errors retain
             # their uncertainty; in particular a timeout must never start a turn.
@@ -278,7 +319,7 @@ def deliver_to_owner(thread_id: str, prompt: str, owner: dict[str, Any], *,
                     "context": {"inheritThreadSettings": True,
                                 "restoreMessage": restore},
                 },
-            }, version=2, target_client_id=target)
+            }, version=2 + version_offset, target_client_id=target, **route)
         result = response.get("result")
         result = result.get("result") if isinstance(result, dict) else None
         if phase == "started":
@@ -295,7 +336,7 @@ def deliver_to_owner(thread_id: str, prompt: str, owner: dict[str, Any], *,
             receipt = result.get("turnId") if isinstance(result, dict) else result
             if not isinstance(receipt, str) or not receipt:
                 raise DeliveryUncertain("Codex delivery response has no turn receipt")
-        return {"phase": phase, "receipt": receipt, "thread_id": thread_id,
+        return {"phase": phase, "receipt": receipt, "thread_id": thread_id, "host_id": host_id,
                 "client_user_message_id": message_id}
     except OwnerUnavailable:
         raise
