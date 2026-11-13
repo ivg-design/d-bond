@@ -25,6 +25,10 @@ enum EventMessagePreview {
         return summarize(raw)
     }
 
+
+
+
+
     static func summarize(_ raw: String) -> String? {
         var source = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !source.isEmpty else { return nil }
