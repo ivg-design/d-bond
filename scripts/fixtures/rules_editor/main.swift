@@ -63,6 +63,12 @@ struct RulesEditorFixture {
                 guard stored.version == expected else { throw NSError(domain: "Fixture", code: 409, userInfo: [NSLocalizedDescriptionKey: "Owner SOP changed; reload before saving."]) }
                 saves.append((expected, next)); stored = next
             })
+        let enabledRule = OwnerSOP(version: 1, rules: [OwnerRule(id:"feature-toggle", text:"enabled: true\n# Background sync\nPreserve settings.")])
+        let generic = RuleEditor(serviceName:"Fixture / Another connection",initial:enabledRule,
+            load:{ enabledRule },persist:{ _, _ in })
+        generic.window.displayIfNeeded()
+        let genericList = tagged("rules.list",generic.window,as:NSTableView.self)
+        require((genericList.view(atColumn:0,row:0,makeIfNecessary:true) as? NSTableCellView)?.textField?.stringValue.contains("Background sync") == true, "Generic heading label missing")
         ui.show()
         ui.window.displayIfNeeded()
         let window = ui.window

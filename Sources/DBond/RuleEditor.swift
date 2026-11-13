@@ -142,9 +142,13 @@ final class RuleEditor: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
     }
 
     private func name(_ rule: OwnerRule) -> String {
-        for line in rule.text.split(whereSeparator: \.isNewline) {
-            let line = line.trimmingCharacters(in:.whitespacesAndNewlines)
-            if line.isEmpty { continue }
+        let lines = rule.text.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in:.whitespacesAndNewlines) }
+        if let heading = lines.first(where: { $0.hasPrefix("#") }) {
+            let label = String(heading.drop(while: {$0 == "#"})).trimmingCharacters(in:.whitespaces)
+            if !label.isEmpty { return String(label.prefix(160)) }
+        }
+        for line in lines {
+            if line.isEmpty || line.lowercased().hasPrefix("enabled:") { continue }
             let title = String(line.drop(while: {$0 == "#"})).trimmingCharacters(in:.whitespaces)
             if !title.isEmpty { return String(title.prefix(160)) }
         }
@@ -158,7 +162,7 @@ final class RuleEditor: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
         text.lineBreakMode = .byTruncatingTail; text.font = .systemFont(ofSize:13,weight:.medium)
         text.translatesAutoresizingMaskIntoConstraints = false; cell.addSubview(text); cell.textField = text
         NSLayoutConstraint.activate([text.leadingAnchor.constraint(equalTo:cell.leadingAnchor,constant:5),text.trailingAnchor.constraint(equalTo:cell.trailingAnchor,constant:-4),text.centerYAnchor.constraint(equalTo:cell.centerYAnchor)])
-        cell.toolTip = name(draft[row]); return cell
+        cell.toolTip = "\(name(draft[row])) · \(draft[row].id)"; return cell
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) {
@@ -182,7 +186,7 @@ final class RuleEditor: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
         guard !changing, let i = active else { return }
         draft[i].text = editor.string
         if let cell = table.view(atColumn:0,row:i,makeIfNecessary:false) as? NSTableCellView {
-            let heading = name(draft[i]); cell.textField?.stringValue = "\(i + 1).  " + heading; cell.toolTip = heading
+            let heading = name(draft[i]); cell.textField?.stringValue = "\(i + 1).  " + heading; cell.toolTip = "\(heading) · \(draft[i].id)"
         }
         refresh()
     }
