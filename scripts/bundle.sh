@@ -48,7 +48,7 @@ cat > "$AGENT_DIR/direct-stdio/launch.sh" <<'SH'
 #!/bin/sh
 set -eu
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-exec python3 "$HERE/adapters/direct/server/mcp.py"
+exec python3 -B "$HERE/adapters/direct/server/mcp.py"
 SH
 chmod 755 "$AGENT_DIR/direct-stdio/launch.sh"
 icon_dir="$(mktemp -d)"
@@ -79,5 +79,7 @@ cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
 PLIST
 /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $BUNDLE_ID" "$APP_DIR/Contents/Info.plist"
 
+# Generated Python caches are not application assets.
+find "$RES_DIR" -type d -name __pycache__ -prune -exec rm -rf '{}' +
 codesign --force --deep --sign - "$APP_DIR"
 echo "Created ad hoc signed app: $APP_DIR"

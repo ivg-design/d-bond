@@ -10,7 +10,7 @@ for candidate in \
   /usr/bin/python3
 do
   if [ -x "$candidate" ] && "$candidate" -c 'import sys; raise SystemExit(not ((3, 9) <= sys.version_info[:2] < (4, 0)))' >/dev/null 2>&1; then
-    exec "$candidate" "$script_dir/mcp.py"
+    exec "$candidate" -B "$script_dir/mcp.py"
   fi
 done
 echo 'D-Bond needs Python 3.9 or newer; no supported local interpreter was found.' >&2

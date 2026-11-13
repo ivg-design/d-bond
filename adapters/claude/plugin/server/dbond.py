@@ -12,6 +12,8 @@ import socket
 import stat
 import subprocess
 import sys
+# The CLI also ships inside a signed macOS app; leave its resources read-only.
+sys.dont_write_bytecode = True
 import tempfile
 import threading
 import time
