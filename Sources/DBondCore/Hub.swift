@@ -33,6 +33,13 @@ public struct EventTracePage {
     public let nextBeforeEventID:String?
     public let total:Int
 }
+public struct BrokerEventSummary {
+    public let eventID, state, createdAt:String
+    public let preview:String?
+    public init(eventID:String,state:String,createdAt:String,preview:String?) {
+        self.eventID=eventID; self.state=state; self.createdAt=createdAt; self.preview=preview
+    }
+}
 public struct Pairing: Codable { public let id,secret,endpoint,destination: String; public let herald:Bool; public let chromeOrigin:String? }
 public struct ServiceView { public let id,name,endpoint,destination: String; public let lastSeen,lastState,chromeOrigin: String?; public let herald,paused:Bool; public let queued,inFlight,subscribers,directSubscribers:Int; public let sop:OwnerSOP?; public let wakeState:String; public let lastVerifiedAt:String? }
 public struct Snapshot { public let endpoint: String; public let services:[ServiceView]; public let eventCount:Int }
@@ -472,12 +479,16 @@ public final class Hub: @unchecked Sendable {
         guard ledger.services.contains(where:{$0.id==service}) else { throw Fault.message("Service connection no longer exists.") }
         return Array(ledger.events.reversed().lazy.compactMap { self.trace($0,viewedBy:service) }.prefix(max(0,min(limit,100))))
     }
-    /// Exact persisted event IDs for a paired service, used to reconcile an
-    /// external intake ledger without reading this store's WAL from the UI.
-    public func storedEventIDs(service:String) throws -> Set<String> {
+    /// Read persisted service receipts under the broker's own lock. The caller
+    /// can compare them with a native host without opening this store's WAL.
+    public func storedEventSummaries(service:String) throws -> [BrokerEventSummary] {
         lock.lock(); defer { lock.unlock() }
         guard ledger.services.contains(where:{$0.id==service}) else { throw Fault.message("Service connection no longer exists.") }
-        return Set(ledger.events.lazy.filter { $0.service == service }.map(\.id))
+        return ledger.events.compactMap { event in
+            guard event.service == service,
+                  let at = event.stages?.first?.at else { return nil }
+            return BrokerEventSummary(eventID:event.id,state:event.state,createdAt:at,preview:event.preview)
+        }
     }
     /// Cursor IDs refer to retained rows, so appends do not shift pages. The first
     /// call captures an upper bound; pass it back on every subsequent page.
