@@ -58,7 +58,7 @@ public final class OwnerSocket {
                     case "list":
                         guard Set(obj.keys)==["op"] else {throw Fault.message("Invalid list request.")}
                         let rows=hub.snapshot().services.map { row -> [String:Any] in
-                            ["id":row.id,"name":row.name,"destination":row.destination,"paused":row.paused,"sopVersion":row.sop?.version ?? 0,"directSubscribers":row.directSubscribers]
+                            ["id":row.id,"name":row.name,"destination":row.destination,"paused":row.paused,"sopVersion":row.sop?.version ?? 0,"directSubscribers":row.directSubscribers,"subscribers":row.subscribers,"wakeState":row.wakeState,"lastVerifiedAt":row.lastVerifiedAt as Any? ?? NSNull()]
                         }
                         reply=try output(["services":rows])
                     case "get_sop":
@@ -75,14 +75,27 @@ public final class OwnerSocket {
                         let events=try hub.recentEventTraces(service:id,limit:obj["limit"] as? Int ?? 20)
                         reply=try output(["events":try JSONSerialization.jsonObject(with:JSONEncoder().encode(events))])
                     case "trace":
-                        guard Set(obj.keys)==["op","id","eventID"],let id=obj["id"] as? String,let eventID=obj["eventID"] as? String else {throw Fault.message("Invalid trace request.")}
-                        let event=try hub.eventTrace(service:id,eventID:eventID)
+                        guard Set(obj.keys).isSubset(of:["op","id","eventID","direction","counterpartID"]),
+                              let id=obj["id"] as? String,let eventID=obj["eventID"] as? String,
+                              obj["direction"] == nil || obj["direction"] is String,
+                              obj["counterpartID"] == nil || obj["counterpartID"] is String else {throw Fault.message("Invalid trace request.")}
+                        let event=try hub.eventTrace(service:id,eventID:eventID,
+                            direction:obj["direction"] as? String,counterpartID:obj["counterpartID"] as? String)
                         reply=try output(["event":try event.map { try JSONSerialization.jsonObject(with:JSONEncoder().encode($0)) } ?? NSNull()])
                     case "send_direct_note":
                         guard Set(obj.keys)==["op","to","id","text"],let to=obj["to"] as? String,
                               let id=obj["id"] as? String,let text=obj["text"] as? String else { throw Fault.message("Invalid owner direct note request.") }
                         let sequence=try hub.sendOwnerDirectNote(to:to,id:id,text:text)
                         reply=try output(["id":id,"to":to,"sequence":sequence,"state":"sent_to_listener"])
+                    case "begin_wake_test":
+                        guard Set(obj.keys).isSubset(of:["op","id","retry"]),let id=obj["id"] as? String,
+                              obj["retry"] == nil || obj["retry"] is Bool else { throw Fault.message("Invalid wake test request.") }
+                        let test=try hub.beginWakeTest(service:id,retry:obj["retry"] as? Bool ?? false)
+                        reply=try output(["id":id,"wakeID":test.id,"wakeState":test.state])
+                    case "finish_registration":
+                        guard Set(obj.keys)==["op","id"],let id=obj["id"] as? String else { throw Fault.message("Invalid finish registration request.") }
+                        let result=try hub.finishRegistration(service:id)
+                        reply=try output(["id":id,"wakeID":result.id as Any? ?? NSNull(),"wakeState":result.state,"scheduled":result.scheduled])
                     default: throw Fault.message("Invalid owner operation.")
                     }
                 } catch { reply=(try? JSONSerialization.data(withJSONObject:["error":String(describing:error)])) ?? Data(#"{"error":"Owner request failed."}"#.utf8) }

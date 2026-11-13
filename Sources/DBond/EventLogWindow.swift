@@ -28,6 +28,7 @@ final class EventLogWindow: NSObject, NSWindowDelegate {
     private let olderButton = NSButton(title: "Older events", target: nil, action: nil)
     private let newerButton = NSButton(title: "Newer events", target: nil, action: nil)
     private let copyButton = NSButton(title: "Copy shown page", target: nil, action: nil)
+    private var refreshScheduled = false
     private var full = false
     private var snapshotLastEventID: String?
     private var beforeCursors: [String?] = [nil]
@@ -46,6 +47,18 @@ final class EventLogWindow: NSObject, NSWindowDelegate {
         window.appearance = NSAppearance(named:.darkAqua)
         window.delegate = self
         build()
+        NotificationCenter.default.addObserver(self, selector: #selector(ledgerUpdated(_:)),
+                                               name: .dbondLedgerUpdated, object: nil)
+    }
+
+    @objc private func ledgerUpdated(_ note: Notification) {
+        guard let changed = note.object as? Hub, changed === hub, !full, !refreshScheduled else { return }
+        refreshScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+            guard let self else { return }
+            self.refreshScheduled = false
+            if !self.full && self.window.isVisible { self.loadPage(live: true) }
+        }
     }
 
     private func build() {
@@ -67,7 +80,7 @@ final class EventLogWindow: NSObject, NSWindowDelegate {
         let header = NSStackView(views:[icon,heading])
         header.orientation = .horizontal; header.alignment = .centerY; header.spacing = 12
         let explanation = NSTextField(wrappingLabelWithString:
-            "Times are local to this Mac, shown to the second. Stages describe stored or observed state; they do not prove an agent saw or answered an event.")
+            "Times are local to this Mac, shown to the second. A direct message stored for a recipient has not necessarily been read by an agent.")
         explanation.font = .systemFont(ofSize:12)
         explanation.textColor = .secondaryLabelColor
         scope.font = .systemFont(ofSize:13,weight:.semibold)
@@ -148,12 +161,14 @@ final class EventLogWindow: NSObject, NSWindowDelegate {
         olderButton.isEnabled = !loading && nextBeforeEventID != nil
         copyButton.isEnabled = !loading && !shownText.isEmpty
     }
-    private func loadPage() {
+    private func loadPage(live: Bool = false) {
         generation += 1
         let request = generation
         let full = full, through = snapshotLastEventID, before = beforeCursors.last ?? nil
-        count.stringValue = "Loading…"
-        updateControls(loading:true)
+        if !live {
+            count.stringValue = "Loading…"
+            updateControls(loading:true)
+        }
         let serviceID = service.id
         DispatchQueue.global(qos:.userInitiated).async { [hub, serviceID, weak self] in
             let result = Result { try hub.eventTracePage(service:serviceID,through:through,before:before,limit:full ? 50 : 10) }
@@ -179,14 +194,51 @@ final class EventLogWindow: NSObject, NSWindowDelegate {
             shownText = page.traces.map { trace in
                 let eventTime = trace.stages.first.map { displayTraceTime($0.at) } ?? "Time unavailable"
                 let version = trace.sopVersion.map { " · rules v\($0)" } ?? ""
+                let direction:String
+                switch trace.direction {
+                case "outbound": direction = "Sent to \(trace.counterpartName ?? "Unknown connection")"
+                case "inbound": direction = "Received from \(trace.counterpartName ?? "Unknown connection")"
+                case "self": direction = "Direct message to this same connection"
+                default:
+                    direction = trace.eventID.hasPrefix("@dot:") ? "Received from Dot" :
+                        trace.state.hasPrefix("dot_") ? "Sent to Dot" : "Local connection event"
+                }
+                let state = trace.deliveryMeaning ?? trace.state
+                let requestPreview = trace.preview ?? (trace.wakeCheck == true ? "Session wake check" : "Message preview unavailable")
+                let replyTime = trace.dotReplyAt.map(displayTraceTime) ?? "Reply time unavailable"
+                if !full {
+                    if trace.state == "dot_replied" {
+                        let answer = trace.dotReplyPreview ?? "Dot reply preview unavailable"
+                        return "\(answer)\n\(replyTime) · Dot replied\nRequest: \(requestPreview)"
+                    }
+                    let heading = trace.preview ?? (trace.wakeCheck == true ? "Session wake check" : trace.eventID)
+                    return "\(heading)\n\(eventTime) · \(direction) · \(state)"
+                }
+                let sequence = trace.brokerSequence.map { "Broker sequence: \($0)\n" } ?? ""
+                let reply = trace.inReplyTo.map { "In reply to event: \($0)\n" } ?? ""
                 let stages = trace.stages.isEmpty ? "  No stage history recorded" : trace.stages.map {
-                    "  \(displayTraceTime($0.at))  \($0.state)  [\($0.basis)]"
+                    let state:String
+                    switch $0.state {
+                    case "peer_delivered": state = "Stored for recipient · agent read unconfirmed"
+                    case "wake_pending" where trace.wakeCheck == true: state = "Wake check stored for recipient"
+                    case "wake_verified" where trace.wakeCheck == true: state = "Authenticated connection acknowledged wake check · AI turn unconfirmed"
+                    default: state = $0.state
+                    }
+                    return "  \(displayTraceTime($0.at))  \(state)  [\($0.basis)]"
                 }.joined(separator:"\n")
-                return "Event \(trace.eventID)\(version)\nEvent time: \(eventTime)\nCurrent state: \(trace.state)\nStages (local time):\n\(stages)"
+                let preview = trace.preview ?? "Message preview unavailable"
+                let eventLabel = trace.wakeCheck == true ? "Wake check" : "Event \(trace.eventID)"
+                let counterpart = trace.counterpartID.map { "Counterpart ID: \($0)\n" } ?? ""
+                let dotAnswer = trace.state == "dot_replied"
+                    ? "Dot reply: \(trace.dotReplyPreview ?? "Preview unavailable")\nObserved (local): \(replyTime)\n\nRequest: \(preview)\n"
+                    : "\(preview)\n"
+                return "\(dotAnswer)\(direction) · \(eventTime)\n\n\(eventLabel)\(version)\n\(counterpart)\(sequence)\(reply)Current state: \(state)\nStages (local time):\n\(stages)"
             }.joined(separator:"\n\n────────────────────────────────────────\n\n")
         }
-        textView.string = shownText
-        textView.scrollRangeToVisible(NSRange(location:0,length:0))
+        if textView.string != shownText {
+            textView.string = shownText
+            textView.scrollRangeToVisible(NSRange(location:0,length:0))
+        }
         if full {
             let newerCount = (beforeCursors.count-1)*50
             let first = page.traces.isEmpty ? 0 : page.total-newerCount-page.traces.count+1
@@ -198,6 +250,7 @@ final class EventLogWindow: NSObject, NSWindowDelegate {
         updateControls(loading:false)
     }
     func windowWillClose(_ notification: Notification) {
+        NotificationCenter.default.removeObserver(self)
         generation += 1
         Self.openWindows.removeValue(forKey:service.id)
     }

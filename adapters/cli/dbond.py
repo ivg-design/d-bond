@@ -28,6 +28,7 @@ APP_DIR = Path(os.environ["DBOND_PAIRING_DIR"]).expanduser() if os.environ.get("
 OWNER_SOCKET = Path.home() / "Library/Application Support/D-Bond Proof of Concept/pair.sock"
 ALIAS_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 EVENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@-]{0,119}$")
+WAKE_ID_RE = re.compile(r"^@wake:[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$")
 SESSION_ID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 MAX_PAIRING = 64 * 1024
 MAX_FRAME = 512 * 1024
@@ -165,6 +166,16 @@ def validate_pairing(data: dict) -> dict:
             or not isinstance(secret, str) or not re.fullmatch(r"[A-Za-z0-9+/]+={0,2}", secret)):
         fail("Use the loopback service endpoint and one-time credential from D-Bond.")
     pairing = {"endpoint": urllib.parse.urlunsplit(url), "secret": secret, "cursor": 0, "pushes": []}
+    destination = data.get("destination")
+    if destination is not None:
+        if destination not in ("dot", "peer", "herald", "demo"):
+            fail("Invalid pairing destination.")
+        pairing["destination"] = destination
+    client, session_id = data.get("client"), data.get("session_id")
+    if client is not None or session_id is not None:
+        if client not in ("codex", "claude") or not isinstance(session_id, str) or not SESSION_ID_RE.fullmatch(session_id):
+            fail("Invalid session binding in pairing.")
+        pairing.update(client=client, session_id=session_id.lower())
     origin = data.get("chromeOrigin")
     if origin is not None:
         if not isinstance(origin, str) or not re.fullmatch(r"chrome-extension://[a-p]{32}", origin):
@@ -297,12 +308,59 @@ def _save(alias: str, pairing: dict) -> None:
         merged = dict(pairing)
         if path.exists():
             existing = _read_pairing(alias)
+            for key in ("client", "session_id"):
+                if key in existing and key in pairing and existing[key] != pairing[key]:
+                    fail("Pairing is already bound to another host session.")
+                if key in existing:
+                    merged.setdefault(key, existing[key])
+            for key in ("destination", "chromeOrigin"):
+                if key in existing:
+                    merged.setdefault(key, existing[key])
             merged["cursor"] = max(int(existing.get("cursor", 0)), int(pairing.get("cursor", 0)))
             merged["direct_cursor"] = max(int(existing.get("direct_cursor", 0)), int(pairing.get("direct_cursor", 0)))
             merged["pushes"] = list(dict.fromkeys(existing.get("pushes", []) + pairing.get("pushes", [])))[-256:]
         _atomic_json(path, merged)
     finally:
         os.close(lock_fd)
+
+
+def bind_session(alias: str, client: str, session_id: str) -> dict:
+    if client not in ("claude", "codex") or not isinstance(session_id, str) or not SESSION_ID_RE.fullmatch(session_id):
+        raise ValueError("An exact supported host session UUID is required")
+    pairing = _read_pairing(alias)
+    canonical = session_id.lower()
+    if pairing.get("session_id") and (pairing.get("client"), pairing.get("session_id")) != (client, canonical):
+        raise ValueError("This pairing is bound to another host session")
+    pairing.update(client=client, session_id=canonical)
+    _save(alias, pairing)
+    return {"state": "bound", "client": client, "session_id": canonical}
+
+
+def session_binding(client: str, session_id: str) -> dict:
+    if client not in ("claude", "codex") or not isinstance(session_id, str) or not SESSION_ID_RE.fullmatch(session_id):
+        raise ValueError("An exact supported host session UUID is required")
+    matches = []
+    store = _safe_dir(create=False)
+    for path in store.glob("*.json"):
+        if path.stem.startswith("request-") or not ALIAS_RE.fullmatch(path.stem):
+            continue
+        try:
+            pairing = _read_pairing(path.stem)
+        except SystemExit:
+            continue
+        if pairing.get("client") == client and pairing.get("session_id") == session_id.lower():
+            service_id = pairing["endpoint"].split("/services/", 1)[1].split("/", 1)[0].lower()
+            matches.append({"alias": path.stem, "service_id": service_id})
+    if len(matches) != 1:
+        raise ValueError("No unique exact D-Bond session binding")
+    return matches[0]
+
+
+def command_session_binding(args) -> None:
+    try:
+        print(json.dumps(session_binding(args.client, args.session_id), ensure_ascii=False))
+    except ValueError as exc:
+        fail(str(exc))
 
 
 def command_link(args) -> None:
@@ -314,6 +372,30 @@ def command_link(args) -> None:
 def command_enroll(args) -> None:
     path = _alias_path(args.alias)
     if path.exists() or path.is_symlink():
+        session_id = getattr(args, "session_id", None)
+        if (getattr(args, "client", None) == "claude" and isinstance(session_id, str)
+                and SESSION_ID_RE.fullmatch(session_id) and not path.is_symlink()):
+            pair = _read_pairing(args.alias)
+            own_id = pair["endpoint"].split("/services/", 1)[1].split("/", 1)[0].lower()
+            service = next((row for row in _owner_request({"op":"list"}).get("services", [])
+                            if row.get("id") == own_id), None)
+            if service and service.get("name", "").startswith("Claude / "):
+                bind_session(args.alias, "claude", session_id)
+                print(json.dumps(_enrollment_payload(args, pair, reused=True), ensure_ascii=False))
+                return
+        if (getattr(args, "client", None) == "codex" and isinstance(session_id, str)
+                and SESSION_ID_RE.fullmatch(session_id) and not path.is_symlink()):
+            pairing = _read_pairing(args.alias)
+            canonical = session_id.lower()
+            bound = pairing.get("client") == "codex" and pairing.get("session_id") == canonical
+            conventional = args.alias.casefold() == f"codex-{canonical}"
+            if conventional and not bound:
+                own_id = pairing["endpoint"].split("/services/", 1)[1].split("/", 1)[0].lower()
+                matches = [row for row in _peers(pairing) if row.get("id", "").lower() == own_id]
+                conventional = len(matches) == 1 and isinstance(matches[0].get("name"), str) and matches[0]["name"].startswith("Codex / ")
+            if bound or conventional:
+                print(json.dumps(_enrollment_payload(args, pairing, reused=True), ensure_ascii=False))
+                return
         fail(f"Alias {args.alias!r} already exists; choose a new alias.")
     lock_path = path.with_suffix(".enrolling")
     try:
@@ -372,21 +454,62 @@ def command_enroll(args) -> None:
         if "error" in value:
             fail("D-Bond refused enrollment. Use a new display name or inspect the app.")
         pairing = validate_pairing(value)
+        if getattr(args, "client", None) == "codex" and SESSION_ID_RE.fullmatch(getattr(args, "session_id", "") or ""):
+            pairing.update(client="codex", session_id=args.session_id.lower())
         _atomic_json(path, pairing)
-        print(json.dumps({"linked": args.alias, "endpoint": pairing["endpoint"]}))
-        if getattr(args, "direct", False):
-            print(f"To receive direct messages, run: dbond direct-listen {args.alias}", file=sys.stderr)
-        elif getattr(args, "client", None) == "claude" or name.startswith("Claude / "):
-            print(
-                "To receive incoming messages, start this command with Monitor in the paired Claude chat: "
-                f"dbond listen {args.alias} --push-only",
-                file=sys.stderr,
-            )
+        print(json.dumps(_enrollment_payload(args, pairing, reused=False), ensure_ascii=False))
     finally:
         try:
             os.unlink(lock_path)
         except FileNotFoundError:
             pass
+
+
+def _enrollment_payload(args, pairing: dict, *, reused: bool) -> dict:
+    client, session_id = getattr(args, "client", None), getattr(args, "session_id", None)
+    if client in ("claude", "codex") and isinstance(session_id, str) and SESSION_ID_RE.fullmatch(session_id):
+        bind_session(args.alias, client, session_id)
+        pairing = _read_pairing(args.alias)
+    result = {"linked": args.alias, "endpoint": pairing["endpoint"],
+              "reused": reused, "pairing_state": "saved"}
+    result["listener"] = _enrollment_listener(args, pairing)
+    if client in ("claude", "codex") and isinstance(session_id, str) and SESSION_ID_RE.fullmatch(session_id):
+        result["wake"] = begin_wake_registration(pairing)
+        if client == "codex" and result["listener"].get("ready") is True:
+            result["registration_finish"] = session_status(args.alias, finish_registration=True).get("registration_finish")
+    return result
+
+
+def begin_wake_registration(pairing: dict) -> dict:
+    instruction = "An initial challenge may arrive during setup. After the listener attaches, explicitly finish registration, END setup, and acknowledge only the delayed owner challenge in the later recipient turn. Do not report wake verified until session-status says wakeState verified."
+    try:
+        from wake_registration import begin
+        value = begin(pairing)
+        state = value.get("state") if isinstance(value, dict) else None
+        result = {"state": state if state in ("pending", "verified", "offline") else "unknown",
+                  "instruction": instruction}
+        if isinstance(value, dict):
+            for key in ("lastVerifiedAt", "verification", "reason"):
+                if isinstance(value.get(key), str) and len(value[key]) <= 160:
+                    result[key] = value[key]
+            if isinstance(result.get("lastVerifiedAt"), str):
+                local = _local_trace_time(result["lastVerifiedAt"])
+                if local != result["lastVerifiedAt"]:
+                    result["lastVerifiedLocal"] = local
+        return result
+    except Exception:
+        return {"state": "unknown", "instruction": instruction}
+
+
+def _enrollment_listener(args, pairing: dict) -> dict:
+    if getattr(args, "client", None) == "codex" and SESSION_ID_RE.fullmatch(getattr(args, "session_id", "") or ""):
+        try:
+            from codex_registration import attach
+            return attach(args.alias, args.session_id.lower(), pairing)
+        except Exception as exc:
+            return {"state": "blocked", "reason": type(exc).__name__,
+                    "instruction": "Pairing was saved, but the Codex host listener could not be attached. Do not report the session as connected."}
+    return session_listener_guidance(args.alias, direct_only=bool(getattr(args, "direct", False)))
 
 
 def _valid_title(value: str | None) -> str | None:
@@ -401,7 +524,7 @@ def _valid_title(value: str | None) -> str | None:
 def _claude_session_title(session_id: str, home: Path | None = None) -> str | None:
     """Read title metadata for one exact Claude session ID; never read prompt text."""
     home = home or Path.home()
-    custom_title = ai_title = desktop_title = None
+    custom_title = ai_title = None
     projects = home / ".claude" / "projects"
     # Match only files whose basename is the supplied ID. No fuzzy lookup or transcript scan.
     if projects.is_dir():
@@ -423,22 +546,29 @@ def _claude_session_title(session_id: str, home: Path | None = None) -> str | No
             except (OSError, UnicodeError):
                 continue
 
-    # Desktop session sidecars have an opaque filename, so inspect only the ID and
-    # title fields needed for an exact cliSessionId match. Never emit unrelated data.
+    return custom_title or ai_title or _claude_desktop_title(session_id, home)
+
+
+def _claude_desktop_title(session_id: str, home: Path | None = None) -> str | None:
+    """Use only the exact host UUID in Desktop's opaque sidecar title records."""
+    if not isinstance(session_id, str) or not SESSION_ID_RE.fullmatch(session_id):
+        return None
+    home = home or Path.home()
     metadata = home / "Library" / "Application Support" / "Claude" / "claude-code-sessions"
     if metadata.is_dir():
         for sidecar in metadata.glob("*/*/local_*.json"):
             try:
+                if sidecar.is_symlink() or sidecar.stat().st_size > 1048576:
+                    continue
                 with sidecar.open("r", encoding="utf-8") as src:
                     row = json.load(src)
                 if isinstance(row, dict) and row.get("cliSessionId") == session_id:
                     candidate = row.get("title")
                     if isinstance(candidate, str):
-                        desktop_title = _valid_title(candidate)
-                    break
+                        return _valid_title(candidate)
             except (OSError, UnicodeError, ValueError):
                 continue
-    return custom_title or ai_title or desktop_title
+    return None
 
 
 def _initiating_claude(start_pid=None):
@@ -539,6 +669,31 @@ def command_direct_send(args) -> None:
                       "duplicate": receipt.get("duplicate"), "state": "broker_recorded"}, ensure_ascii=False))
 
 
+def command_dot_inbox(args) -> None:
+    if args.after < 0 or args.through < args.after:
+        fail("Expected 0 <= after <= through.")
+    pairing = _read_pairing(args.alias)
+    after = args.after
+    while True:
+        params = urllib.parse.urlencode({"after": after, "through": args.through})
+        code, page = _request(pairing, "GET", f"{pairing['endpoint']}/history?{params}")
+        messages = page.get("messages")
+        last = page.get("lastSequence")
+        if (code != 200 or not isinstance(messages, list) or type(last) is not int
+                or not after <= last <= args.through):
+            fail("Invalid D-Bond history page.")
+        for row in messages:
+            if (row.get("state") != "dot_push" or not re.fullmatch(r"@dot:[0-9]+", row.get("id", ""))
+                    or not after < row["sequence"] <= last):
+                fail("Invalid addressed Dot history entry.")
+            print(json.dumps({"id":row["id"], "sequence":row["sequence"], "text":row["reply"]}, ensure_ascii=False))
+        if page.get("hasMore") is False:
+            return
+        if page.get("hasMore") is not True or last <= after:
+            fail("Invalid D-Bond history cursor.")
+        after = last
+
+
 def command_direct_inbox(args) -> None:
     pairing = _read_pairing(args.alias)
     after = pairing.get("direct_cursor", 0) if args.after is None else args.after
@@ -581,12 +736,208 @@ def command_direct_listen(args) -> None:
         return
 
 
+def session_listener_guidance(alias: str, *, direct_only: bool = False) -> dict:
+    if not ALIAS_RE.fullmatch(alias):
+        raise ValueError("Invalid pairing alias")
+    command = f"dbond session-listen {alias}"
+    streams = ["direct"] if direct_only else ["direct", "dot"]
+    return {"command": command, "mode": "foreground", "streams": streams,
+            "verify_command": f"dbond session-status {alias} --finish-registration",
+            "instruction": f"In this registration turn, start the host's native Monitor on {command} for this exact paired session, then run dbond session-status {alias} --finish-registration after its direct and Dot streams attach. If registration_finish.scheduled is true, END this setup turn now. Handle the delayed owner challenge in the later recipient turn and verify wakeState then. Keep the Monitor running; saved cursors replay after absence. This command alone does not wake a closed chat."}
+
+
+def valid_direct_source(source: str, sender: str) -> bool:
+    return (isinstance(source, str) and
+            ((bool(EVENT_RE.fullmatch(source)) and not source.startswith("@dot:"))
+             or (sender == "owner" and bool(WAKE_ID_RE.fullmatch(source)))))
+
+
+def session_status(alias: str, *, finish_registration: bool = False) -> dict:
+    if type(finish_registration) is not bool:
+        raise ValueError("finish_registration must be a boolean")
+    result = _session_status_readonly(alias)
+    if not finish_registration:
+        return result
+    if result.get("state") != "subscriber_present":
+        return {**result, "registration_finish": {"scheduled": False, "state": "listener_not_ready"}}
+    try:
+        reply = _owner_request({"op": "finish_registration", "id": result["service_id"]})
+        if (not isinstance(reply, dict) or not isinstance(reply.get("id"), str)
+                or reply["id"].lower() != result["service_id"]
+                or type(reply.get("scheduled")) is not bool
+                or reply.get("wakeState") not in ("pending", "verified", "offline")):
+            raise ValueError("Invalid owner registration finish response")
+        finish = {"scheduled": reply["scheduled"], "wakeState": reply["wakeState"],
+                  "state": "scheduled" if reply["scheduled"] else "not_scheduled"}
+    except (OSError, ValueError, SystemExit):
+        finish = {"scheduled": False, "state": "unknown"}
+    return {**result, "registration_finish": finish}
+
+
+def _session_status_readonly(alias: str) -> dict:
+    pairing = _read_pairing(alias)
+    service_id = pairing["endpoint"].split("/services/", 1)[1].split("/", 1)[0].lower()
+    try:
+        response = _owner_request({"op": "list"})
+    except (OSError, ValueError, SystemExit):
+        return {"alias": alias, "service_id": service_id, "state": "unknown",
+                "evidence": "owner_socket_unavailable"}
+    services = response.get("services") if isinstance(response, dict) else None
+    if not isinstance(services, list):
+        return {"alias": alias, "service_id": service_id, "state": "unknown",
+                "evidence": "owner_socket_invalid_response"}
+    matches = [row for row in services if isinstance(row, dict)
+               and isinstance(row.get("id"), str) and row["id"].lower() == service_id]
+    if len(matches) != 1:
+        return {"alias": alias, "service_id": service_id, "state": "revoked",
+                "evidence": "owner_socket_connection_absent"}
+    row = matches[0]
+    destination = row.get("destination")
+    required = ["direct"] if destination == "peer" else ["direct", "dot"] if destination == "dot" else []
+    direct_count, dot_count = row.get("directSubscribers"), row.get("subscribers")
+    if (not required or type(direct_count) is not int or direct_count < 0
+            or type(dot_count) is not int or dot_count < 0):
+        state = "unknown"
+    elif row.get("paused") is True:
+        state = "paused"
+    elif direct_count > 0 and ("dot" not in required or dot_count > 0):
+        state = "subscriber_present"
+    else:
+        state = "pending_listener"
+    wake_state = row.get("wakeState")
+    if wake_state not in ("pending", "verified", "offline"):
+        wake_state = "unknown"
+    verified_at = row.get("lastVerifiedAt", row.get("lastWakeVerifiedAt"))
+    if not isinstance(verified_at, str) or len(verified_at) > 64:
+        verified_at = None
+    result = {"alias": alias, "service_id": service_id, "state": state,
+            "required_streams": required, "direct_subscribers": direct_count,
+            "dot_subscribers": dot_count, "wakeState": wake_state,
+            "lastWakeVerifiedAt": verified_at, "evidence": "owner_socket_subscriber_counts"}
+    if verified_at is not None:
+        local = _local_trace_time(verified_at)
+        if local != verified_at:
+            result["lastWakeVerifiedLocal"] = local
+    return result
+
+
+def command_session_status(args) -> None:
+    print(json.dumps(session_status(args.alias, finish_registration=args.finish_registration), ensure_ascii=False))
+
+
+def _session_row(event: dict, *, direct: bool, alias: str, service_id: str, cursor: int) -> dict | None:
+    if not isinstance(event, dict) or type(event.get("sequence")) is not int or event["sequence"] < 1:
+        raise ValueError("Invalid D-Bond session sequence")
+    if event["sequence"] <= cursor:
+        return None
+    if direct:
+        sender, target, source = event.get("from"), event.get("to"), event.get("id")
+        text, parent = event.get("text"), event.get("in_reply_to")
+        if (not valid_direct_source(source, sender)
+                or not isinstance(sender, str) or (sender != "owner" and not SESSION_ID_RE.fullmatch(sender))
+                or target != service_id or not isinstance(text, str) or not text.strip()
+                or len(text.encode("utf-8")) > 65536
+                or (parent is not None and (not isinstance(parent, str) or not EVENT_RE.fullmatch(parent)))):
+            raise ValueError("Invalid addressed D-Bond direct message")
+        return {"state": "direct_message", "alias": alias, "source_id": source,
+                "sender_id": sender, "sequence": event["sequence"], "text": text,
+                "in_reply_to": parent}
+    if event.get("state") != "dot_push":
+        return None
+    source, text = event.get("id"), event.get("reply")
+    if (not isinstance(source, str) or not re.fullmatch(r"@dot:[0-9]+", source)
+            or not isinstance(text, str) or not text.strip() or len(text.encode("utf-8")) > 65536):
+        raise ValueError("Invalid addressed D-Bond Dot push")
+    return {"state": "dot_push", "alias": alias, "source_id": source,
+            "sequence": event["sequence"], "text": text}
+
+
+def _session_lane(alias: str, direct: bool, emit, stop: threading.Event, errors: list[str]) -> None:
+    delay = 0.5
+    while not stop.is_set():
+        stream = None
+        try:
+            pairing = _read_pairing(alias)
+            if not direct and pairing.get("destination") == "peer":
+                return
+            key = "direct_cursor" if direct else "cursor"
+            cursor = pairing.get(key, 0)
+            if type(cursor) is not int or cursor < 0:
+                raise ValueError("Invalid saved D-Bond session cursor")
+            service_id = pairing["endpoint"].split("/services/", 1)[1].split("/", 1)[0]
+            stream_pairing = {**pairing, "endpoint": _direct_url(pairing)} if direct else pairing
+            stream = Stream(stream_pairing, cursor)
+            delay = 0.5
+            while not stop.is_set():
+                event = stream.next_event()
+                if event is None:
+                    raise ConnectionError("D-Bond session stream closed")
+                if type(event.get("sequence")) is int and event["sequence"] <= cursor:
+                    continue
+                row = _session_row(event, direct=direct, alias=alias, service_id=service_id, cursor=cursor)
+                if row is not None:
+                    try:
+                        emit(row)
+                    except OSError as exc:
+                        raise ValueError("Session output closed") from exc
+                    if direct:
+                        cursor = pairing[key] = event["sequence"]
+                    else:
+                        pushes = pairing.setdefault("pushes", [])
+                        if row["source_id"] not in pushes:
+                            pushes.append(row["source_id"])
+                        pairing["pushes"] = pushes[-256:]
+                cursor = pairing[key] = event["sequence"]
+                _save(alias, pairing)
+        except (OSError, ConnectionError):
+            if not stop.wait(delay):
+                delay = min(20, delay * 2)
+        except (ValueError, SystemExit, KeyError, IndexError) as exc:
+            errors.append(f"{('direct' if direct else 'Dot')} session stream stopped: {exc}")
+            stop.set()
+        finally:
+            if stream:
+                stream.close()
+
+
+def command_session_listen(args) -> None:
+    pairing = _read_pairing(args.alias)
+    direct_only = pairing.get("destination") == "peer"
+    stop = threading.Event()
+    errors: list[str] = []
+    output_lock = threading.Lock()
+
+    def emit(row: dict) -> None:
+        with output_lock:
+            print(json.dumps(row, ensure_ascii=False, separators=(",", ":")), flush=True)
+
+    lanes = [threading.Thread(target=_session_lane, args=(args.alias, True, emit, stop, errors), daemon=True)]
+    if not direct_only:
+        lanes.append(threading.Thread(target=_session_lane, args=(args.alias, False, emit, stop, errors), daemon=True))
+    for lane in lanes:
+        lane.start()
+    try:
+        while not stop.wait(0.25):
+            pass
+    except KeyboardInterrupt:
+        stop.set()
+    if errors:
+        fail(errors[0])
+
+
 def command_trace(args) -> None:
     if not SESSION_ID_RE.fullmatch(args.connection_id):
         fail("Use the exact connection UUID shown by `dbond peers` or the D-Bond app.")
     try:
         if args.event_id:
-            value = _owner_request({"op": "trace", "id": args.connection_id, "eventID": args.event_id})
+            request = {"op": "trace", "id": args.connection_id, "eventID": args.event_id}
+            if getattr(args, "direction", None):
+                request["direction"] = args.direction
+            if getattr(args, "counterpart_id", None):
+                if not SESSION_ID_RE.fullmatch(args.counterpart_id):
+                    fail("Use the exact counterpart connection UUID.")
+                request["counterpartID"] = args.counterpart_id
+            value = _owner_request(request)
         else:
             value = _owner_request({"op": "list_events", "id": args.connection_id, "limit": args.limit})
     except (OSError, ValueError) as exc:
@@ -751,6 +1102,10 @@ def parser() -> argparse.ArgumentParser:
     enroll.add_argument("--title", help="title supplied by the host; preferred over local metadata")
     enroll.add_argument("--direct", action="store_true", help="create a direct-only pairing; existing Dot pairings can also use direct messaging")
     enroll.set_defaults(run=command_enroll)
+    session_binding_cmd = sub.add_parser("session-binding", help="resolve one exact local host session to its private pairing without showing credentials")
+    session_binding_cmd.add_argument("session_id", help="exact host session UUID")
+    session_binding_cmd.add_argument("--client", required=True, choices=("claude", "codex"))
+    session_binding_cmd.set_defaults(run=command_session_binding)
     ask = sub.add_parser("ask", help="submit a question and await a Dot ACK or reply")
     ask.add_argument("alias"); ask.add_argument("question")
     ask.add_argument("--timeout", type=int, default=120, help="seconds to await explicit Dot ACK/reply (default 120)")
@@ -760,6 +1115,18 @@ def parser() -> argparse.ArgumentParser:
     peers = sub.add_parser("peers", help="list connections by their D-Bond names and IDs")
     peers.add_argument("alias", help="your own paired alias")
     peers.set_defaults(run=lambda args: print(json.dumps(_peers(_read_pairing(args.alias)), ensure_ascii=False)))
+    wake_ack = sub.add_parser("wake-ack", help="answer the wake challenge received by this session")
+    wake_ack.add_argument("alias")
+    wake_ack.add_argument("token")
+    def acknowledge_wake(args):
+        from wake_registration import acknowledge
+        print(json.dumps(acknowledge(args.alias, args.token)))
+    wake_ack.set_defaults(run=acknowledge_wake)
+    history = sub.add_parser("dot-inbox", help="read retained addressed Dot pushes in a sequence range without moving the listener")
+    history.add_argument("alias")
+    history.add_argument("--after", required=True, type=int)
+    history.add_argument("--through", required=True, type=int)
+    history.set_defaults(run=command_dot_inbox)
     direct_peers = sub.add_parser("direct-peers", help="list direct recipients (existing Dot and direct-only pairings)")
     direct_peers.add_argument("alias"); direct_peers.set_defaults(run=command_direct_peers)
     direct_send = sub.add_parser("direct-send", help="send directly to another paired service without Dot")
@@ -776,10 +1143,19 @@ def parser() -> argparse.ArgumentParser:
     direct_inbox.set_defaults(run=command_direct_inbox)
     direct_listen = sub.add_parser("direct-listen", help="hold an event-driven direct-message stream and resume on reconnect")
     direct_listen.add_argument("alias"); direct_listen.set_defaults(run=command_direct_listen)
+    session_listen = sub.add_parser("session-listen", help="hold both direct and addressed Dot streams for one paired host Monitor")
+    session_listen.add_argument("alias"); session_listen.set_defaults(run=command_session_listen)
+    session_status_cmd = sub.add_parser("session-status", help="check owner-observed direct and Dot stream subscriptions for one pairing")
+    session_status_cmd.add_argument("alias")
+    session_status_cmd.add_argument("--finish-registration", action="store_true", help="once explicitly requested after listener attach, schedule the delayed registration proof")
+    session_status_cmd.set_defaults(run=command_session_status)
     trace = sub.add_parser("trace", help="show recent local event traces in this Mac's timezone")
     trace.add_argument("connection_id", help="exact connection UUID")
     trace.add_argument("event_id", nargs="?", help="optional exact event ID")
     trace.add_argument("--limit", type=int, choices=range(1, 101), default=20)
+    trace.add_argument("--direction", choices=["local", "inbound", "outbound", "self"],
+                       help="select one direction when an event ID appears more than once")
+    trace.add_argument("--counterpart-id", help="exact other connection UUID for an ambiguous direct event ID")
     trace.set_defaults(run=command_trace)
     listen = sub.add_parser("listen", help="receive addressed Dot pushes via SSE")
     listen.add_argument("alias"); listen.add_argument("--push-only",action="store_true",help="Print only addressed pushes (for Claude Monitor)"); listen.set_defaults(run=command_listen)

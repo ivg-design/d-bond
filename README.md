@@ -30,19 +30,30 @@ An operator who already owns a connected Dot app can use the
 [private Dot plugin packager](adapters/dot/README.md) with their own app binding.
 Its ZIP stays outside this repository and does not create a Dot connection.
 
-The [CLI](adapters/cli/README.md) can enroll through the app's private owner
-socket or link a wizard pairing. For example:
+With the connector enabled, say **“Register this session in D-Bond”** inside
+each Codex Desktop or Claude Code chat you want to reach. The connector pairs
+the current chat with the Mac and attaches that chat's listener. Claude may
+ask you to allow its Monitor. Open **Connections** and look for a verified
+wake check on each chat. You can then ask either chat to send a question
+directly to the other by its displayed name. Each chat keeps its own address
+when several sessions use the same service.
 
-```sh
-python3 adapters/cli/dbond.py enroll review --service Codex --topic 'Review chat'
-python3 adapters/cli/dbond.py ask review 'What should I check?'
-python3 adapters/cli/dbond.py listen review
-```
+Open **Events** on either connection for the ten latest entries. Each message
+shows its direction, the other connection, local time to the second, and up
+to two sentences (210 characters). Fenced code begins with a one-line preview.
+**View complete log** includes older entries, message IDs and reply references.
+The [CLI guide](adapters/cli/README.md) covers manual pairing and diagnostics.
 
 The [Claude adapter](adapters/claude/README.md) supports a local Desktop MCP
+extension and a Claude Code plugin with a session-start hook. A Claude Code
+channel requires preview opt-in in an open session. The
+[Codex Desktop listener](adapters/codex-session/README.md) is a separate,
+opt-in per-chat adapter; it uses the host's bundled CLI to queue an event
+pointer for that exact chat. A broker receipt or queued pointer does not prove
 is an isolated Chrome client, not an installed
 reads and edits owner SOP rules and event traces through the app's private
-same-user socket. A [Vollna example](examples/vollna/README.md) forwards one
+same-user socket; its direct tools can send and read authenticated messages.
+A [Vollna example](examples/vollna/README.md) forwards one
 versioned job from an existing authenticated receiver; it is not a hosted
 webhook or an active cutover. Generic clients POST `{"id":"stable-id","payload":{...}}`
 to the wizard endpoint with `Authorization: Bearer <credential>`, then read
@@ -56,7 +67,12 @@ your local D-Bond owner socket and does not install a Dot connection.
 
 Run `swift build`, `python3 -m unittest discover -s scripts -p 'test_*.py'`,
 `python3 -m unittest discover -s adapters/cli -p 'test_*.py'`, and
-`python3 scripts/test_owner_sop.py` for the policy and trace regression.
+`python3 scripts/test_owner_sop.py` for the policy and trace regression, and
+`python3 Tests/test_event_log_pages.py` plus
+`python3 Tests/test_wake_roundtrip.py` for isolated persisted event and wake
+state checks. The Codex listener fixture is
+`python3 adapters/codex-session/test_listener.py`; the Claude Code hook fixture
+is `python3 -m unittest discover -s adapters/claude/session-hooks -p 'test_*.py'`.
 `scripts/smoke.py` exercises
 the compiled probe with disposable stores. These checks do not establish live
 Dot delivery or installed app acceptance.

@@ -1,6 +1,7 @@
 """Isolated persisted-ledger pagination check; no production identity or service."""
 import base64
 import json
+import socket
 import sqlite3
 import subprocess
 import tempfile
@@ -33,6 +34,7 @@ class Probe:
 
 
 class EventLogPageTests(unittest.TestCase):
+
     def test_all_retained_pages_stable_and_connection_specific(self):
         with tempfile.TemporaryDirectory() as temp:
             directory = Path(temp)

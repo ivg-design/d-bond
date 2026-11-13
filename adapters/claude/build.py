@@ -25,14 +25,19 @@ def main():
                               ("server/launch.sh", HERE / "server/launch.sh"),
                               ("server/mcp.py", HERE / "server/mcp.py"),
                               ("server/dbond.py", ROOT / "adapters/cli/dbond.py"),
-                              ("server/owner.py", ROOT / "adapters/cli/owner.py")]:
+                              *[(f"server/{name}", ROOT / "adapters/cli" / name)
+                                for name in ("owner.py", "codex_registration.py", "wake_registration.py")]]:
                 bundle.write(src, name)
     plugin_server = HERE / "plugin" / "server"
     plugin_server.mkdir(exist_ok=True)
     shutil.copy2(HERE / "server/mcp.py", plugin_server / "mcp.py")
     shutil.copy2(HERE / "server/launch.sh", plugin_server / "launch.sh")
     shutil.copy2(ROOT / "adapters/cli/dbond.py", plugin_server / "dbond.py")
-    shutil.copy2(ROOT / "adapters/cli/owner.py", plugin_server / "owner.py")
+    for name in ("owner.py", "codex_registration.py", "wake_registration.py"):
+        shutil.copy2(ROOT / "adapters/cli" / name, plugin_server / name)
+    hook = HERE / "plugin/hooks/session_start.py"
+    hook.parent.mkdir(exist_ok=True)
+    shutil.copy2(HERE / "session-hooks/session_start.py", hook)
     print(OUTPUT)
 
 if __name__ == "__main__":

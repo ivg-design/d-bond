@@ -1,4 +1,5 @@
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -50,6 +51,47 @@ class OwnerSocketTest(unittest.TestCase):
 
 
 class MCPTest(unittest.TestCase):
+    def test_both_plugin_manifests_and_staged_owner_match_server(self):
+        plugin = HERE / "plugins/d-bond-local-control"
+        outer = json.loads((plugin / "plugin.json").read_text())
+        active = json.loads((plugin / ".codex-plugin/plugin.json").read_text())
+        self.assertEqual(outer["version"], mcp.VERSION)
+        self.assertEqual(active["version"], mcp.VERSION)
+        self.assertEqual((plugin / "server/owner.py").read_bytes(),
+                         (HERE.parent / "cli/owner.py").read_bytes())
+        self.assertEqual((plugin / "server/direct.py").read_bytes(),
+                         (HERE.parent / "direct/server/mcp.py").read_bytes())
+        for module in ("dbond.py", "wake_registration.py", "codex_registration.py"):
+            self.assertEqual((plugin / "server" / module).read_bytes(),
+                             (HERE.parent / "cli" / module).read_bytes())
+
+    def test_one_plugin_exposes_shared_direct_and_owner_tools_without_duplicate_names(self):
+        names = [tool["name"] for tool in mcp.TOOLS]
+        self.assertEqual(len(names), len(set(names)))
+        for name in ("list_connections", "set_sop", "enroll_agent", "session_status",
+                     "acknowledge_wake", "send_direct_message", "receive_direct_messages",
+                     "answer_direct_message", "ask_dot", "answer_dot_push"):
+            self.assertIn(name, names)
+        with mock.patch.object(mcp.direct, "invoke", return_value={"state": "broker_recorded"}) as call:
+            self.assertEqual(mcp.call("answer_direct_message", {"alias": "fixture"}),
+                             {"state": "broker_recorded"})
+        call.assert_called_once_with("answer_direct_message", {"alias": "fixture"})
+
+    def test_generic_pairing_failure_does_not_exit_combined_server(self):
+        requests = '\n'.join(json.dumps(row) for row in (
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "session_status", "arguments": {"alias": "missing"}}},
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+        )) + '\n'
+        output = io.StringIO()
+        with mock.patch.object(mcp.direct, "invoke", side_effect=SystemExit(2)), \
+             mock.patch.object(sys, "stdin", io.StringIO(requests)), \
+             mock.patch.object(sys, "stdout", output):
+            mcp.run()
+        rows = [json.loads(line) for line in output.getvalue().splitlines()]
+        self.assertTrue(rows[0]["result"]["isError"])
+        self.assertEqual(rows[1]["id"], 2)
+        self.assertEqual(len(rows[1]["result"]["tools"]), 16)
+
     def test_local_status_is_read_only_and_requires_no_pairing(self):
         with mock.patch.object(mcp.owner, "local_status", return_value={"installation": "installed", "service": "offline"}) as check:
             self.assertEqual(mcp.call("local_status", {}), {"installation": "installed", "service": "offline"})
@@ -64,6 +106,18 @@ class MCPTest(unittest.TestCase):
         self.assertNotIn(".068", formatted["events"][0]["stages"][0]["at"])
         self.assertIn("2026", formatted["events"][0]["stages"][1]["at"])
         self.assertIn(".068", raw["events"][0]["stages"][0]["at"])
+
+    def test_connection_list_adds_local_verification_time_without_changing_wire_value(self):
+        stamp = "2026-11-12T20:00:00.123Z"
+        source = {"services": [{"id": ID, "lastVerifiedAt": stamp},
+                               {"id": "other", "lastVerifiedAt": None}]}
+        with mock.patch.object(mcp.owner, "request", return_value=source):
+            listed = mcp.call("list_connections", {})
+        self.assertEqual(listed["services"][0]["lastVerifiedAt"], stamp)
+        self.assertIn("2026", listed["services"][0]["lastVerifiedLocal"])
+        self.assertNotIn(".123", listed["services"][0]["lastVerifiedLocal"])
+        self.assertNotIn("lastVerifiedLocal", listed["services"][1])
+        self.assertNotIn("lastVerifiedLocal", source["services"][0])
 
     def test_routes_and_version_check(self):
         original = mcp.owner.request

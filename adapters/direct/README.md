@@ -18,6 +18,18 @@ The service endpoint also supports authenticated `GET /v1/services/ID/messages/p
 
 ## Generic MCP stdio
 
+For a paired session that receives both message routes, start one foreground
+`dbond session-listen ALIAS` in its host Monitor and check
+`dbond session-status ALIAS`. The combined stream keeps separate durable
+cursors for direct messages and addressed Dot pushes. A direct-only pairing
+opens only its direct stream. Owner subscription counts and wake verification
+remain separate from a broker storage receipt.
+
+Ordinary `session-status` is read-only. During registration, after the host
+Monitor attaches, explicitly call `session-status ALIAS --finish-registration`
+once and end setup. The broker schedules a delayed proof for a later recipient
+turn; repeating finish is idempotent for that challenge/generation.
+
 Call `local_status` without a pairing to check whether the existing Mac app is
 installed and its local owner service answers. It returns only installation
 and service states, with no paths, connection list, or credentials. The probe

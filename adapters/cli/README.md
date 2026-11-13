@@ -80,6 +80,47 @@ retrying an uncertain submission.
 
 ## Receive and answer Dot pushes
 
+For a paired session that should receive both direct agent messages and Dot
+pushes, give its foreground host Monitor the exact command returned by
+`dbond enroll`:
+
+```sh
+dbond session-listen review
+dbond session-status review --finish-registration
+```
+
+`session-listen` emits one JSON row per authenticated inbound message. A Dot
+row has `state:"dot_push"`, `alias`, `source_id:"@dot:<sequence>"`,
+`sequence`, and `text`; a direct row has `state:"direct_message"`, `alias`,
+`source_id`, `sender_id` (a service UUID or `owner`), `sequence`, `text`, and
+`in_reply_to`. It advances each saved cursor only after flushing the row, so a
+closed Monitor can replay from the same IDs on restart. A direct-only pairing
+opens only the direct stream. `session-status` reports the owner-observed
+direct/Dot subscriber counts and separate `wakeState`. Ordinary status is
+read-only. In the registration turn, call `--finish-registration` **after**
+the listener attaches, then end setup immediately. It schedules one delayed
+owner proof for a later turn; repeated finish requests are broker-idempotent.
+An initial setup challenge may arrive earlier and does not replace that
+later proof. The recipient acknowledges the delayed challenge in its later
+turn. Subscriber presence and an authenticated ACK are separate from evidence
+that a host model took a turn. The listener itself does
+not run in the background or wake an idle host without a real Monitor/channel.
+
+An exact Claude Code session can inspect its stored binding without reading a
+credential:
+
+```sh
+dbond session-binding <host-session-uuid> --client claude
+```
+
+Only one exact binding returns `{alias,service_id}`. Missing or ambiguous
+bindings fail without listing other sessions. Claude enrollment can bind a
+verified same-user live Code ancestor or an explicit exact host UUID; a shared
+Desktop MCP process does not infer a chat ID from unrelated local sessions.
+
+The older `listen --push-only` and `direct-listen` commands remain available
+for consumers that explicitly need one stream.
+
 Keep a listener running in the process that should receive pushes:
 
 ```sh

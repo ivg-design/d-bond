@@ -18,7 +18,6 @@ final class AgentSetup: NSObject, NSWindowDelegate {
     private let window: NSWindow
     private var scrollView: NSScrollView!
     private let target = NSPopUpButton()
-    private let alias = NSTextField()
     private let status = NSTextField(labelWithString: "")
     private let send = NSButton(title: "Send setup note to listener", target: nil, action: nil)
     private let codexState = NSTextField(wrappingLabelWithString: "Checking Codex…")
@@ -131,9 +130,7 @@ final class AgentSetup: NSObject, NSWindowDelegate {
         codexState.identifier = .init("setup.codex.status"); claudeState.identifier = .init("setup.claude.status")
         desktopState.identifier = .init("setup.desktop.status")
         let desktop = section("Claude Desktop", "Manage the local extension in Claude Desktop → Settings → Extensions.", controls:[desktopState,desktopAction])
-        alias.placeholderString = "Existing pairing alias"
-        alias.toolTip = "The alias of the Claude Code session you want to connect."
-        let code = section("Claude Code", "The channel plugin uses this session’s D-Bond pairing. Claude Code controls wake permissions.", controls:[claudeState,alias,claudeAction])
+        let code = section("Claude Code", "Each session enrolls its own D-Bond pairing after installation. Claude Code controls wake permissions.", controls:[claudeState,claudeAction])
         let codex = section("Codex", "Local Control manages connections and rules. Direct messaging lets a chat talk to its paired services.", controls:[codexState,codexAction])
         let generic = section("Other stdio agents", "Copy a local MCP configuration for an agent that supports stdio tools. This does not wake an idle chat.", controls: [button("Copy stdio configuration", action: #selector(copyStdio))])
         send.target = self; send.action = #selector(sendSetupNote)
@@ -171,7 +168,6 @@ final class AgentSetup: NSObject, NSWindowDelegate {
             stack.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -24),
             stack.topAnchor.constraint(equalTo: content.topAnchor, constant: 20),
             stack.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -20),
-            alias.widthAnchor.constraint(equalToConstant: 360),
             target.widthAnchor.constraint(equalToConstant: 510),
             status.widthAnchor.constraint(equalToConstant: 510)
         ])
@@ -231,6 +227,11 @@ final class AgentSetup: NSObject, NSWindowDelegate {
         }
     }
 
+    nonisolated private static func pluginHasDirect(_ c: AgentInstallState.Component) -> Bool {
+        guard c.status == .installed, c.enabled == true, let version = c.version else { return false }
+        return version.compare("0.1.3", options: .numeric) != .orderedAscending
+    }
+
     private func describe(_ item: AgentInstallState.Component) -> String {
         switch item.status {
         case .unavailable: return "Couldn’t read host settings"
@@ -248,7 +249,7 @@ final class AgentSetup: NSObject, NSWindowDelegate {
     @objc private func checkInstalls() {
         guard !saving, checkTask == nil else { return }
         for b in [codexAction,claudeAction] { setAction(b,"Checking…",enabled:false) }
-        checkAction.isEnabled = false; alias.isHidden = true
+        checkAction.isEnabled = false
         desktopInstall()
         let resource = launcher, cv = codexVersion, av = claudeVersion
         checkTask = Task { [weak self] in
@@ -260,23 +261,25 @@ final class AgentSetup: NSObject, NSWindowDelegate {
             guard !Task.isCancelled, let self else { return }
             self.checkTask = nil; self.checkAction.isEnabled = true
             if let c {
-                self.codexState.stringValue = "Local Control: " + self.describe(c.plugin) + "\nDirect messaging: " + self.describe(c.directMCP)
+                let direct = Self.pluginHasDirect(c.plugin) ? "Included in Local Control" :
+                    (c.directMCP.status == .installed ? "Legacy separate server: " + self.describe(c.directMCP) : "Requires Local Control 0.1.3")
+                self.codexState.stringValue = "Local Control: " + self.describe(c.plugin) + "\nDirect messaging: " + direct
                 self.codexState.toolTip = [c.plugin.source,c.directMCP.source].compactMap{$0}.joined(separator:" · ")
-                if !Self.safeToInstall(c.plugin) || !Self.safeToInstall(c.directMCP) {
+                if !Self.safeToInstall(c.plugin) {
                     self.setAction(self.codexAction,"Review Codex settings",enabled:false)
-                } else if c.plugin.status == .missing || c.directMCP.status == .missing {
-                    let title = c.plugin.status == .missing ? (c.directMCP.status == .missing ? "Install Codex tools…" : "Install Local Control…") : "Add direct messaging…"
-                    self.setAction(self.codexAction,title,enabled:true)
+                } else if c.plugin.status == .missing {
+                    self.setAction(self.codexAction,"Install Codex tools…",enabled:true)
                 } else if c.plugin.updateAvailable {
                     self.setAction(self.codexAction,"Update Local Control…",enabled:true)
-                } else { self.setAction(self.codexAction,"Already installed",enabled:false) }
+                } else if Self.pluginHasDirect(c.plugin) {
+                    self.setAction(self.codexAction,"Already installed",enabled:false)
+                } else { self.setAction(self.codexAction,"Review plugin version",enabled:false) }
             } else {
                 self.codexState.stringValue = "The bundled Codex adapter is missing."
                 self.setAction(self.codexAction,"Installer unavailable",enabled:false)
             }
             self.claudeState.stringValue = self.describe(a); self.claudeState.toolTip = a.source
             self.updatingClaude = a.status == .installed && a.updateAvailable
-            self.alias.isHidden = a.status != .missing
             switch a.status {
             case .missing: self.setAction(self.claudeAction,"Install Claude Code plugin…",enabled:true)
             case .installed where a.enabled == false: self.setAction(self.claudeAction,"Disabled in Claude Code",enabled:false)
@@ -346,13 +349,7 @@ final class AgentSetup: NSObject, NSWindowDelegate {
     }
 
     @objc private func installClaudeCode() {
-        let value = alias.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         let update = updatingClaude
-        guard update || (!value.isEmpty && value.utf8.count <= 64 &&
-              value.unicodeScalars.allSatisfy({ CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-").contains($0) })) else {
-            show("Pairing alias required", "Enter an existing local alias using letters, numbers, period, underscore or hyphen.")
-            return
-        }
         guard let marketplace = Bundle.main.url(forResource: "claude-code-marketplace", withExtension: nil, subdirectory: "agent-installers"),
               let cli = executable("claude") else { show("Installer unavailable", "The packaged plugin or Claude Code CLI is missing."); return }
         beginInstall()
@@ -366,26 +363,23 @@ final class AgentSetup: NSObject, NSWindowDelegate {
                           current.source == "Claude Code marketplace: d-bond-local · user" else { return false }
                     guard Self.execute(cli, ["plugin","update","d-bond@d-bond-local","--scope","user","--json"]) == 0 else { return false }
                 } else {
-                    guard current.status == .missing, Self.installClaudeCodePlugin(cli:cli,marketplace:marketplace,alias:value) else { return false }
+                    guard current.status == .missing, Self.installClaudeCodePlugin(cli:cli,marketplace:marketplace) else { return false }
                 }
                 let verified = AgentInstallState.claudeCode(expectedVersion:expected)
                 return verified.status == .installed && verified.enabled == true && !verified.updateAvailable
             }.value
             guard let self else { return }
             self.endInstall()
-            if result { self.status.stringValue = update ? "Claude Code plugin updated. Restart Claude Code to load it; your pairing was kept." : "Claude Code plugin installed. Use the chosen alias in your intended session." }
+            if result { self.status.stringValue = update ? "Claude Code plugin updated. Restart Claude Code to load it; existing session pairings were kept." : "Claude Code plugin installed. Enroll from each intended session to start its own connection." }
             else { self.show("Claude Code setup needs attention", "The requested version or configuration could not be verified. Review the plugin in Claude Code; your other connections were left alone.") }
         }
     }
 
-    nonisolated private static func installClaudeCodePlugin(cli: URL, marketplace: URL, alias: String) -> Bool {
+    nonisolated private static func installClaudeCodePlugin(cli: URL, marketplace: URL) -> Bool {
         guard let result = json(cli, ["plugin", "install", "d-bond", "--marketplace", marketplace.path,
-                                      "--config", "alias=\(alias)", "--scope", "user", "--json"]) as? [String: Any],
-              result["outcome"] as? String == "ok", result["configApplied"] as? Bool == true,
+                                      "--scope", "user", "--json"]) as? [String: Any],
+              result["outcome"] as? String == "ok",
               result["pluginId"] as? String == "d-bond@d-bond-local" else { return false }
-        guard let check = json(cli, ["plugin", "configure", "d-bond@d-bond-local", "--json"]) as? [String: Any],
-              let configured = check["configured"] as? [String], configured.contains("alias"),
-              let inputs = check["inputs"] as? [String: Any], inputs["alias"] as? String == alias else { return false }
         return true
     }
 
@@ -406,8 +400,8 @@ final class AgentSetup: NSObject, NSWindowDelegate {
 
     nonisolated private static func installCodexTools(cli: URL, marketplace: URL, launcher: URL, expected: String) -> String {
         let initial = AgentInstallState.codex(expectedVersion:expected,expectedLauncher:launcher)
-        guard safeToInstall(initial.plugin), safeToInstall(initial.directMCP) else {
-            return "Existing Codex settings could not be verified or are disabled. No settings were changed."
+        guard safeToInstall(initial.plugin) else {
+            return "Existing Codex plugin settings could not be verified or are disabled. No settings were changed."
         }
         if initial.plugin.status == .missing || initial.plugin.updateAvailable {
             let existingGit = initial.plugin.source == "Codex marketplace: dbond-github"
@@ -424,17 +418,11 @@ final class AgentSetup: NSObject, NSWindowDelegate {
             }
             guard execute(cli,["plugin","add",pluginID,"--json"]) == 0 else { return "Could not install the requested Codex plugin from its marketplace." }
         }
-        if initial.directMCP.status == .missing {
-            guard execute(cli,["mcp","add","d-bond-agent","--","/bin/sh",launcher.path]) == 0 else {
-                return "Could not add direct messaging. Check the status of Local Control above."
-            }
-        }
         let after = AgentInstallState.codex(expectedVersion:expected,expectedLauncher:launcher)
-        guard after.plugin.status == .installed, after.plugin.enabled == true, !after.plugin.updateAvailable,
-              after.directMCP.status == .installed, after.directMCP.enabled == true else {
-            return "Could not verify the current version of both Codex tools. Check the installed marketplace for an update; D-Bond kept your existing configuration."
+        guard pluginHasDirect(after.plugin), !after.plugin.updateAvailable else {
+            return "Could not verify Local Control 0.1.3 or newer. Check the installed marketplace; D-Bond kept your existing direct server unchanged."
         }
-        return "Codex Local Control and direct messaging are installed and enabled. Open a new chat if needed for tool discovery."
+        return "Codex Local Control includes direct and Dot messaging. Existing d-bond-agent settings were left unchanged. Open a new chat if needed for tool discovery."
     }
 
     nonisolated private static func json(_ cli: URL, _ args: [String]) -> Any? {

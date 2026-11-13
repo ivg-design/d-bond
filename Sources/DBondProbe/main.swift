@@ -67,7 +67,8 @@ func run() throws {
                 try emit(["saved":true])
             case "trace":
                 let id=object["id"] as? String ?? "", eventID=object["eventID"] as? String ?? ""
-                let value=try hub.eventTrace(service:id,eventID:eventID)
+                let value=try hub.eventTrace(service:id,eventID:eventID,
+                    direction:object["direction"] as? String,counterpartID:object["counterpartID"] as? String)
                 try emit(["event":try value.map { try JSONSerialization.jsonObject(with:JSONEncoder().encode($0)) } ?? NSNull()])
             case "trace_page":
                 let id=object["id"] as? String ?? ""

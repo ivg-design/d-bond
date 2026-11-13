@@ -16,7 +16,9 @@ product_dir="$(swift build -c release --show-bin-path)"
 cp "$product_dir/DBond" "$BIN_DIR/DBond"
 cp "$ROOT/scripts/native_link.py" "$RES_DIR/"
 install -m 755 "$ROOT/adapters/cli/dbond.py" "$RES_DIR/dbond"
-install -m 644 "$ROOT/adapters/cli/owner.py" "$RES_DIR/owner.py"
+for module in owner.py wake_registration.py codex_registration.py; do
+  install -m 644 "$ROOT/adapters/cli/$module" "$RES_DIR/$module"
+done
 
 # Package connector installers without any local pairing or host credentials.
 python3 "$ROOT/adapters/claude/build.py" >/dev/null
@@ -34,16 +36,26 @@ cat > "$AGENT_DIR/claude-code-marketplace/.claude-plugin/marketplace.json" <<'JS
 {"name":"d-bond-local","owner":{"name":"IVG"},"plugins":[{"name":"d-bond","source":"./plugin"}]}
 JSON
 install -m 644 "$ROOT/adapters/claude/plugin/.claude-plugin/plugin.json" "$AGENT_DIR/claude-code-marketplace/plugin/.claude-plugin/plugin.json"
+mkdir -p "$AGENT_DIR/claude-code-marketplace/plugin/hooks"
+install -m 644 "$ROOT/adapters/claude/plugin/hooks/hooks.json" "$AGENT_DIR/claude-code-marketplace/plugin/hooks/"
+install -m 755 "$ROOT/adapters/claude/plugin/hooks/session_start.py" "$AGENT_DIR/claude-code-marketplace/plugin/hooks/"
 install -m 644 "$ROOT/adapters/claude/plugin/.mcp.json" "$AGENT_DIR/claude-code-marketplace/plugin/.mcp.json"
-for name in dbond.py mcp.py owner.py; do
+for name in dbond.py mcp.py owner.py wake_registration.py codex_registration.py; do
   install -m 644 "$ROOT/adapters/claude/plugin/server/$name" "$AGENT_DIR/claude-code-marketplace/plugin/server/$name"
 done
 install -m 755 "$ROOT/adapters/claude/plugin/server/launch.sh" "$AGENT_DIR/claude-code-marketplace/plugin/server/launch.sh"
 install -m 644 "$ROOT/adapters/codex/.agents/plugins/marketplace.json" "$AGENT_DIR/codex-marketplace/.agents/plugins/marketplace.json"
 ditto "$ROOT/adapters/codex/plugins/d-bond-local-control" "$AGENT_DIR/codex-marketplace/plugins/d-bond-local-control"
 install -m 644 "$ROOT/adapters/direct/server/mcp.py" "$AGENT_DIR/direct-stdio/adapters/direct/server/mcp.py"
-install -m 644 "$ROOT/adapters/cli/dbond.py" "$AGENT_DIR/direct-stdio/adapters/cli/dbond.py"
-install -m 644 "$ROOT/adapters/cli/owner.py" "$AGENT_DIR/direct-stdio/adapters/cli/owner.py"
+mkdir -p "$AGENT_DIR/codex-session"
+for module in dbond.py owner.py wake_registration.py codex_registration.py; do
+  install -m 644 "$ROOT/adapters/cli/$module" "$AGENT_DIR/direct-stdio/adapters/cli/$module"
+  install -m 644 "$ROOT/adapters/cli/$module" "$AGENT_DIR/codex-session/$module"
+done
+for module in "$ROOT"/adapters/codex-session/*.py; do
+  [[ "$(basename "$module")" == test_* ]] && continue
+  install -m 644 "$module" "$AGENT_DIR/codex-session/"
+done
 cat > "$AGENT_DIR/direct-stdio/launch.sh" <<'SH'
 #!/bin/sh
 set -eu
@@ -70,8 +82,8 @@ cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
   <key>CFBundleIconFile</key><string>D-Bond.icns</string>
   <key>CFBundleName</key><string>D-Bond</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.3.1</string>
-  <key>CFBundleVersion</key><string>4</string>
+  <key>CFBundleShortVersionString</key><string>0.3.2</string>
+  <key>CFBundleVersion</key><string>5</string>
   <key>LSUIElement</key><true/>
   <key>NSHighResolutionCapable</key><true/>
 </dict>
