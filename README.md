@@ -11,7 +11,7 @@ proof that Dot received, acknowledged, or answered it.
 
 Requires macOS 13+, Swift, and Python 3.9+. Build with `swift build`, then run
 `bash scripts/install_app.sh` to create and install an ad hoc signed app in
-`~/Applications`. Open D-Bond, then choose **Add Connection…**. Select the
+`~/Applications`. Open D-Bond → **Open Connections** → **Add Connection…**. Select the
 local demo destination to try the broker without a Dot connection. The wizard
 lets you copy the endpoint and one-time credential for the paired service.
 See the [connection guide](docs/CONNECTIONS.md) for service setup, owner SOP
@@ -49,7 +49,7 @@ to the wizard endpoint with `Authorization: Bearer <credential>`, then read
 `<endpoint>/stream?after=0` with the same credential for receipts. Reuse an
 unchanged ID and payload after an uncertain POST.
 
-To add the local control plugin from the planned public repository, run
+To add the local control plugin from the public repository, run
 `codex plugin marketplace add ivg-design/dbond`, then
 `codex plugin add d-bond-local-control@dbond-github`. This plugin controls only
 your local D-Bond owner socket and does not install a Dot connection.

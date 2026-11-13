@@ -13,6 +13,7 @@ final class ConnectionsWindowController: NSObject, NSWindowDelegate {
     private var documentView: ConnectionDocumentView?
     private var rows: [String: ConnectionRowView] = [:]
     private var refreshTimer: Timer?
+    private var ruleEditors: [String: RuleEditor] = [:]
 
     init(hub: Hub, onAdd: @escaping () -> Void, onSetup: @escaping (ServiceView) -> Void, onAgents: @escaping () -> Void, onLog: @escaping () -> Void, onBridge: @escaping () -> Void, onDotSetup: @escaping () -> Void) {
         self.hub = hub
@@ -154,105 +155,22 @@ final class ConnectionsWindowController: NSObject, NSWindowDelegate {
     }
 
     private func editSOP(_ id: String) {
+        if let editor = ruleEditors[id] { editor.show(); return }
         guard let service = hub.snapshot().services.first(where: { $0.id == id }) else { return }
-        let oldRules = service.sop?.rules ?? []
-        var rules = oldRules
-        while true {
-            let alert = Brand.alert()
-            alert.messageText = "Instructions for \(service.name)"
-            alert.informativeText = "Choose one rule to edit or delete. Rule text may contain multiple paragraphs. Changes are saved together as a new version for future events."
-            alert.addButton(withTitle: "Edit Selected")
-            alert.addButton(withTitle: "Add Rule")
-            alert.addButton(withTitle: "Delete Selected")
-            alert.addButton(withTitle: "Save and Close")
-            alert.addButton(withTitle: "Cancel")
-            let picker = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 480, height: 28), pullsDown: false)
-            if rules.isEmpty { picker.addItem(withTitle: "No rules yet") }
-            for (index, rule) in rules.enumerated() {
-                let preview = rule.text.replacingOccurrences(of: "\n", with: " ")
-                picker.addItem(withTitle: "\(index + 1). \(String(preview.prefix(65)))")
-            }
-            alert.buttons[0].isEnabled = !rules.isEmpty
-            alert.buttons[2].isEnabled = !rules.isEmpty
-            alert.accessoryView = picker
-            let choice = alert.runModal().rawValue - NSApplication.ModalResponse.alertFirstButtonReturn.rawValue
-            switch choice {
-            case 0:
-                let index = picker.indexOfSelectedItem
-                guard rules.indices.contains(index) else { continue }
-                if let text = editRuleText(rules[index].text, title: "Edit rule \(index + 1)") { rules[index].text = text }
-            case 1:
-                if let text = editRuleText("", title: "Add rule") { rules.append(OwnerRule(id: UUID().uuidString, text: text)) }
-            case 2:
-                let index = picker.indexOfSelectedItem
-                guard rules.indices.contains(index) else { continue }
-                rules.remove(at: index)
-            case 3:
-                guard rules != oldRules else { return }
-                let next = OwnerSOP(version: (service.sop?.version ?? 0) + 1, rules: rules)
-                do { try hub.setSOP(service: id, sop: next, expectedVersion: service.sop?.version ?? 0); refresh() }
-                catch { showError("Could not save rules", error.localizedDescription) }
-                return
-            default:
-                return
-            }
-        }
-    }
-
-    private func editRuleText(_ original: String, title: String) -> String? {
-        let alert = Brand.alert()
-        alert.messageText = title
-        alert.informativeText = "Paste or edit the complete text. Paragraphs and line breaks belong to this one rule."
-        alert.addButton(withTitle: "Keep Rule")
-        alert.addButton(withTitle: "Cancel")
-        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 580, height: 350))
-        scroll.hasVerticalScroller = true
-        scroll.borderType = .bezelBorder
-        let editor = NSTextView(frame: scroll.bounds)
-        editor.isRichText = false
-        editor.isAutomaticQuoteSubstitutionEnabled = false
-        editor.isAutomaticDashSubstitutionEnabled = false
-        editor.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
-        editor.string = original
-        scroll.documentView = editor
-        alert.accessoryView = scroll
-        guard alert.runModal() == .alertFirstButtonReturn else { return nil }
-        guard !editor.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            showError("Rule is empty", "Use Delete Selected to remove a rule.")
-            return nil
-        }
-        return editor.string
+        let editor = RuleEditor(serviceName: service.name, initial: service.sop,
+            load: { [hub] in try hub.getSOP(service: id) },
+            persist: { [weak self, hub] next, version in
+                try hub.setSOP(service: id, sop: next, expectedVersion: version)
+                self?.refresh()
+            })
+        ruleEditors[id] = editor
+        editor.onClose = { [weak self] in self?.ruleEditors.removeValue(forKey: id) }
+        editor.show()
     }
 
     private func showTrace(_ id: String) {
         guard let service = hub.snapshot().services.first(where: { $0.id == id }) else { return }
-        do {
-            let traces = try hub.recentEventTraces(service: id, limit: 10)
-            let body = traces.isEmpty ? "No events recorded for this connection yet." : traces.map { trace in
-                let stages = trace.stages.map { "  \(displayTraceTime($0.at))  \($0.state)  [\($0.basis)]" }.joined(separator: "\n")
-                let version = trace.sopVersion.map { " · rules v\($0)" } ?? ""
-                return "\(trace.eventID)\(version)\n\(stages)"
-            }.joined(separator: "\n\n")
-            let alert = Brand.alert()
-            alert.messageText = "Recent events · \(service.name)"
-            alert.informativeText = "Receipt times use this Mac’s timezone. broker_recorded is local state; native_observed is an observed native response. Neither alone proves a final reply."
-            alert.addButton(withTitle: "Done")
-            alert.addButton(withTitle: "Copy trace")
-            let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 560, height: 300))
-            scroll.hasVerticalScroller = true
-            scroll.borderType = .bezelBorder
-            let text = NSTextView(frame: scroll.bounds)
-            text.isEditable = false
-            text.isRichText = false
-            text.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
-            text.string = body
-            scroll.documentView = text
-            alert.accessoryView = scroll
-            if alert.runModal() == .alertSecondButtonReturn {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(body, forType: .string)
-            }
-        } catch { showError("Could not read event trace", error.localizedDescription) }
+        EventLogWindow.show(hub:hub,service:service)
     }
 
     private func confirmDelete(_ id: String) {

@@ -112,6 +112,33 @@ class DBondCLITest(unittest.TestCase):
         with self.assertRaises(SystemExit):
             dbond._read_pairing("bad")
 
+    def test_pairing_dir_rejects_traversal_home_root_and_dangling_parent(self):
+        home = Path(self.tmp.name)
+        outside = home.parent / (home.name + "-outside")
+        lexical_escape = home / ".." / outside.name / "pairings"
+        with patch.object(dbond, "APP_DIR", lexical_escape), contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                dbond._safe_dir()
+        self.assertFalse(outside.exists())
+        with patch.object(dbond, "APP_DIR", home), contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                dbond._safe_dir()
+        dangling = home / "dangling"
+        dangling.symlink_to(outside)
+        with patch.object(dbond, "APP_DIR", dangling / "pairings"), contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                dbond._safe_dir()
+        self.assertFalse(outside.exists())
+        target_link = home / "target-link"
+        target_link.symlink_to(outside)
+        with patch.object(dbond, "APP_DIR", target_link), contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                dbond._safe_dir()
+        self.assertFalse(outside.exists())
+        # The preexisting default layout remains available and owner-private.
+        with patch.object(dbond, "APP_DIR", home / "Library/Application Support/D-Bond CLI"):
+            self.assertEqual(dbond._safe_dir().stat().st_mode & 0o777, 0o700)
+
     def test_trace_time_formats_fractional_and_legacy_iso_in_local_zone(self):
         fractional = dbond._local_trace_time("2026-11-12T16:40:11.068+00:00")
         legacy = dbond._local_trace_time("2026-11-12T16:40:11+00:00")

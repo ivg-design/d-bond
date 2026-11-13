@@ -22,7 +22,7 @@ import urllib.request
 import uuid
 from pathlib import Path
 
-APP_DIR = Path.home() / "Library/Application Support/D-Bond CLI"
+APP_DIR = Path(os.environ["DBOND_PAIRING_DIR"]).expanduser() if os.environ.get("DBOND_PAIRING_DIR") else Path.home() / "Library/Application Support/D-Bond CLI"
 OWNER_SOCKET = Path.home() / "Library/Application Support/D-Bond Proof of Concept/pair.sock"
 ALIAS_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 EVENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@-]{0,119}$")
@@ -81,13 +81,15 @@ def _safe_dir(create: bool = True) -> Path:
         relative = APP_DIR.relative_to(home)
     except ValueError:
         fail("Pairing store must be inside this user's home directory.")
+    if not relative.parts or ".." in relative.parts:
+        fail("Pairing store must be a child directory inside this user's home directory.")
     current = home
     for part in relative.parts[:-1]:
         current = current / part
-        if current.exists() and current.is_symlink():
+        if current.is_symlink():
             fail("Pairing store path contains a symlink; refusing to use it.")
     current = APP_DIR
-    if current.exists() and current.is_symlink():
+    if current.is_symlink():
         fail("Pairing store path contains a symlink; refusing to use it.")
     if not APP_DIR.exists():
         if not create:

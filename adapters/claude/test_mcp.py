@@ -79,10 +79,15 @@ def exchange(channel=False, interpreter=None, native=False):
             proc.stdin.write('{"jsonrpc":"2.0","method":"notifications/initialized"}\n')
             proc.stdin.flush()
             tools = request(2, "tools/list")["result"]["tools"]
-            expected = {"enroll", "peers", "ask", "answer", "direct_peers", "direct_send", "direct_answer"}
+            expected = {"local_status", "enroll", "peers", "ask", "answer", "direct_peers", "direct_send", "direct_answer"}
             if not channel:
                 expected.update(("wait_for_push", "wait_for_direct"))
             assert {t["name"] for t in tools} == expected
+            status = request(30, "tools/call", {"name": "local_status", "arguments": {}})
+            value = json.loads(status["result"]["content"][0]["text"])
+            assert value["installation"] in {"installed", "uninstalled", "unknown"}, value
+            assert value["service"] in {"reachable", "offline", "unknown"}, value
+            assert set(value) == {"installation", "service"}, value
             if channel:
                 assert "alias" not in tools[0]["inputSchema"]["properties"]
             bad = request(3, "tools/call", {"name": "peers", "arguments": {"alias": "missing"}})
@@ -143,12 +148,12 @@ def enrollment_reuse():
         with mock.patch.object(pathlib.Path, "home", return_value=home), \
              mock.patch.object(mcp.dbond, "APP_DIR", store), \
              mock.patch.object(mcp, "cli", side_effect=fake_cli), \
-             mock.patch.object(mcp.dbond, "_peers", return_value=[{"id": service_id, "name": "Claude / Design review"}]):
-            first = mcp.enroll({"topic": "Design review"})
-            second = mcp.enroll({"topic": "Design review"})
+             mock.patch.object(mcp.dbond, "_peers", return_value=[{"id": service_id, "name": "Claude / Webflow review"}]):
+            first = mcp.enroll({"topic": "Webflow review"})
+            second = mcp.enroll({"topic": "Webflow review"})
             assert not first["reused"] and second["reused"]
             assert first["alias"] == second["alias"] and len(sent) == 1
-            assert sent[0][3] == "Claude / Design review"
+            assert sent[0][3] == "Claude / Webflow review"
 
 
 def direct_tool_commands():

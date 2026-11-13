@@ -20,12 +20,14 @@ The app runs in the menu bar. Opening it again brings up **Connections**. A fres
 
 ## Attach your SOP once
 
-In **Connections**, choose **Rules** beside the service, add a rule, paste the instructions and save. Rules can hold multi-paragraph documents. Order them as Dot should read them. The owner can change a connection’s rules without re-pairing, editing the webhook body, or changing another service. Each accepted service request carries the rule version it had at intake; retries of the same event retain it.
+In **Connections**, choose **Rules** next to a service. Select a rule in the list to edit its Markdown. **Add** starts a new rule; the arrows change the order Dot reads them. Use the toolbar for headings, bold text, lists, checklists, or code, and **Preview** to see the formatted instructions. **Save rules** (⌘S) applies all your edits together. If another editor saved first, your draft stays open: copy it before you reload the saved rules. The owner can change a connection’s rules without re-pairing, editing the webhook body, or changing another service. Each accepted service request carries the rule version it had at intake; retries of the same event retain it.
 
 
 
 ## Inspect a delivery
 
+
+The **Events** window opens with the newest ten events for that connection. Click **View complete log** to page through every event retained in its local ledger, 50 at a time. **Older events** and **Newer events** move through the captured history; new arrivals do not shift a page while you browse. The log shows each event's first recorded time, current state, rule version when available, and every recorded stage with its basis. Times are displayed in this Mac's timezone to the second. **Copy shown page** copies only the visible page. Deleting the connection removes its retained history.
 
 - A **queued** timestamp means the local Mac stored the event. **dot_stored** means the transport accepted it into storage.
 - **dot_acknowledged** and **dot_replied** are separate. The displayed local times show when D-Bond observed those changes; they do not establish when a person saw a banner or a second app acted.
@@ -42,3 +44,5 @@ The native Dot subscription and its account grant are separate from your service
 
 
 [Direct agent messages](../adapters/direct/README.md) documents the CLI commands, stdio tools, streaming inbox, and which setup steps need an open client session.
+
+In **Agent Setup**, use **Check again** after changing a host setting. Codex Local Control and direct messaging have separate statuses. Claude Code and Claude Desktop are separate installations. A missing component can be added without recreating a pairing. A disabled or conflicting configuration is shown for review. From any updated D-Bond MCP adapter, call `local_status` to check whether the Mac app is installed and its local bridge is reachable; this does not register a service or establish that an agent is listening.

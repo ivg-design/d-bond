@@ -1,6 +1,6 @@
 {
   "name": "d-bond-local-control",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Configure D-Bond connection SOPs and inspect event traces through the owner-only local socket.",
   "author": {"name": "IVG"},
   "interface": {

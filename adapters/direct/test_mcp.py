@@ -25,10 +25,17 @@ class DirectMCPTests(unittest.TestCase):
                                  capture_output=True, timeout=5, check=True)
         responses = [json.loads(line) for line in process.stdout.splitlines()]
         names = {item["name"] for item in responses[1]["result"]["tools"]}
-        self.assertTrue({"enroll_agent","list_direct_peers","send_direct_message",
+        self.assertTrue({"local_status","enroll_agent","list_direct_peers","send_direct_message",
                          "receive_direct_messages","answer_direct_message","ask_dot",
                          "wait_for_dot_push","answer_dot_push"} <= names)
         self.assertIn("does not wake an idle", responses[0]["result"]["instructions"])
+
+    def test_local_status_requires_no_alias_or_pairing(self):
+        with patch.object(mcp.owner, "local_status", return_value={"installation":"installed","service":"reachable"}) as check:
+            self.assertEqual(mcp.invoke("local_status", {}), {"installation":"installed","service":"reachable"})
+            with self.assertRaisesRegex(ValueError, "no arguments"):
+                mcp.invoke("local_status", {"alias":"x"})
+        check.assert_called_once_with()
 
     def test_direct_send_and_dot_ask_use_different_routes(self):
         pairing = {"endpoint":"http://127.0.0.1:1234/v1/services/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/events",

@@ -7,6 +7,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from unittest import mock
 
 sys.dont_write_bytecode = True
 HERE = Path(__file__).resolve().parent
@@ -49,6 +50,13 @@ class OwnerSocketTest(unittest.TestCase):
 
 
 class MCPTest(unittest.TestCase):
+    def test_local_status_is_read_only_and_requires_no_pairing(self):
+        with mock.patch.object(mcp.owner, "local_status", return_value={"installation": "installed", "service": "offline"}) as check:
+            self.assertEqual(mcp.call("local_status", {}), {"installation": "installed", "service": "offline"})
+            with self.assertRaisesRegex(ValueError, "no arguments"):
+                mcp.call("local_status", {"id": ID})
+        check.assert_called_once_with()
+
     def test_trace_output_is_local_and_omits_subseconds_without_mutating_input(self):
         raw = {"events": [{"stages": [{"at": "2026-11-12T16:40:11.068+00:00"},
                                         {"at": "2026-11-12T16:40:11+00:00"}]}]}

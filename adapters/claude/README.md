@@ -2,12 +2,19 @@
 
 Build the local Claude Desktop extension with `python3 adapters/claude/build.py`,
 then install `dist/d-bond-claude.mcpb` through Claude Desktop's local extension
-settings. Keep D-Bond running. Version 0.1.3 provides `enroll`, `peers`, `ask`,
+settings. Keep D-Bond running. Version 0.1.4 provides read-only `local_status`,
+`enroll`, `peers`, `ask`,
 `wait_for_push`, `answer`, `direct_peers`, `direct_send`, `wait_for_direct`, and
 `direct_answer`. The direct tools address any paired service without Dot.
 Storage is a broker receipt, not proof of a recipient model turn. Desktop can
 receive only while a wait tool runs, for at most 60 seconds; it cannot wake a
 closed or idle chat. No pairing credential is bundled.
+
+`local_status` requires no pairing. It reports only app installation
+(`installed`, `uninstalled`, or `unknown`) and owner-service reachability
+(`reachable`, `offline`, or `unknown`). An installed older app without the owner
+API can report `offline`. The short, read-only check runs only on explicit
+tool call; MCP startup does not probe the app or expose paths and credentials.
 
 For Claude Code, build first and load `adapters/claude/plugin` as a local plugin.
 Configure a unique pairing alias for the open session and use its `enroll`

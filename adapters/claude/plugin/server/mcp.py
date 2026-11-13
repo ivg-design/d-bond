@@ -17,12 +17,14 @@ import uuid
 from pathlib import Path
 
 import dbond
+import owner
 
-VERSION = "0.1.3"
+VERSION = "0.1.4"
 CHANNEL = os.environ.get("DBOND_CLAUDE_CHANNEL") == "1"
 ALIAS = os.environ.get("DBOND_CLAUDE_ALIAS", "claude-code")
 OUTPUT_LOCK = threading.Lock()
 TOOLS = [
+    ("local_status", "Check whether the D-Bond Mac app is installed and its owner service is reachable. Read-only; no pairing or credentials required.", {}, []),
     ("enroll", "Connect this chat by topic, defaulting to the Claude service. Reuse a local pairing with the same service/topic on reconnect. An optional alias and display_name preserve explicit setup.",
      {"topic": "The actual topic of this chat", "service": "Service name; defaults to Claude", "alias": "Optional short local pairing alias", "display_name": "Optional explicit full display name, such as Claude / Design review"}, []),
     ("peers", "List paired D-Bond connections by display name and ID.", {"alias": "Local pairing alias"}, ["alias"]),
@@ -141,6 +143,10 @@ def direct_send(alias, to, text, source_id=None, message_id=None):
 
 
 def call_tool(name, args):
+    if name == "local_status":
+        if args:
+            raise ValueError("local_status takes no arguments")
+        return owner.local_status()
     if name == "enroll":
         return enroll(args)
     alias = args.get("alias", ALIAS if CHANNEL else None)

@@ -15,6 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "cli"))
 import dbond  # noqa: E402
+import owner  # noqa: E402
 
 
 def tool(name, description, properties, required=()):
@@ -25,6 +26,7 @@ def tool(name, description, properties, required=()):
 
 STRING = {"type": "string"}
 TOOLS = [
+    tool("local_status", "Check whether the D-Bond Mac app is installed and its owner service is reachable. Read-only; no pairing or credentials required.", {}),
     tool("enroll_agent", "Create a private local pairing through the owner socket. Existing Dot pairings already support direct messaging.",
          {"alias": STRING, "name": STRING, "direct_only": {"type": "boolean"}}, ("alias", "name")),
     tool("list_direct_peers", "List active or paused direct recipients by stable connection ID and display name.",
@@ -48,6 +50,10 @@ TOOLS = [
 
 
 def invoke(name, args):
+    if name == "local_status":
+        if args:
+            raise ValueError("local_status takes no arguments")
+        return owner.local_status()
     if name == "enroll_agent":
         capture = io.StringIO()
         values = {"alias": args["alias"], "name": args["name"], "direct": args.get("direct_only", False),

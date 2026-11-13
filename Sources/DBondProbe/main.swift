@@ -69,6 +69,13 @@ func run() throws {
                 let id=object["id"] as? String ?? "", eventID=object["eventID"] as? String ?? ""
                 let value=try hub.eventTrace(service:id,eventID:eventID)
                 try emit(["event":try value.map { try JSONSerialization.jsonObject(with:JSONEncoder().encode($0)) } ?? NSNull()])
+            case "trace_page":
+                let id=object["id"] as? String ?? ""
+                let page=try hub.eventTracePage(service:id,through:object["through"] as? String,
+                    before:object["before"] as? String,limit:object["limit"] as? Int ?? 50)
+                try emit(["ids":page.traces.map(\.eventID),"total":page.total,
+                    "through":page.snapshotLastEventID as Any? ?? NSNull(),
+                    "next":page.nextBeforeEventID as Any? ?? NSNull()])
             default: throw ProbeError()
             }
             continue

@@ -6,6 +6,13 @@ public struct OwnerRule: Codable, Equatable { public var id,text:String; public 
 public struct OwnerSOP: Codable, Equatable { public var version:Int; public var rules:[OwnerRule]; public init(version:Int,rules:[OwnerRule]) { self.version=version; self.rules=rules } }
 public struct TraceStage: Codable, Equatable { public var state,at,basis:String }
 public struct EventTrace: Codable { public var service,eventID,state:String; public var sopVersion:Int?; public var stages:[TraceStage] }
+/// A stable slice of one connection's retained ledger history, newest first.
+public struct EventTracePage {
+    public let traces:[EventTrace]
+    public let snapshotLastEventID:String?
+    public let nextBeforeEventID:String?
+    public let total:Int
+}
 public struct Pairing: Codable { public let id,secret,endpoint,destination: String; public let herald:Bool; public let chromeOrigin:String? }
 public struct ServiceView { public let id,name,endpoint,destination: String; public let lastSeen,lastState,chromeOrigin: String?; public let herald,paused:Bool; public let queued,inFlight,subscribers,directSubscribers:Int; public let sop:OwnerSOP? }
 public struct Snapshot { public let endpoint: String; public let services:[ServiceView]; public let eventCount:Int }
@@ -237,6 +244,46 @@ public final class Hub: @unchecked Sendable {
         return ledger.events.filter{$0.service==service}.suffix(max(0,min(limit,100))).reversed().map {
             EventTrace(service:$0.service,eventID:$0.id,state:$0.state,sopVersion:$0.sop?.version,stages:$0.stages ?? [])
         }
+    }
+    /// Cursor IDs refer to retained rows, so appends do not shift pages. The first
+    /// call captures an upper bound; pass it back on every subsequent page.
+    public func eventTracePage(service:String,through snapshotLastEventID:String? = nil,
+                               before beforeEventID:String? = nil,limit:Int = 50) throws -> EventTracePage {
+        lock.lock(); defer { lock.unlock() }
+        guard ledger.services.contains(where:{$0.id==service}) else { throw Fault.message("Service connection no longer exists.") }
+        let events=ledger.events
+        let upper:Int
+        if let snapshotLastEventID {
+            guard let index=events.lastIndex(where:{$0.service==service && $0.id==snapshotLastEventID}) else {
+                throw Fault.message("Event history changed. Reopen the log.")
+            }
+            upper=index
+        } else {
+            upper=events.lastIndex(where:{$0.service==service}) ?? -1
+        }
+        let boundary:Int
+        if let beforeEventID {
+            guard let index=events.lastIndex(where:{$0.service==service && $0.id==beforeEventID}), index<=upper else {
+                throw Fault.message("Event history changed. Reopen the log.")
+            }
+            boundary=index
+        } else { boundary=upper+1 }
+        let pageSize=max(1,min(limit,100))
+        var total=0, rows:[EventTrace]=[], hasOlder=false
+        if upper>=0 {
+            for index in 0...upper where events[index].service==service { total+=1 }
+            if boundary>0 {
+                for index in stride(from:boundary-1,through:0,by:-1) where events[index].service==service {
+                    if rows.count==pageSize { hasOlder=true; break }
+                    let e=events[index]
+                    rows.append(EventTrace(service:e.service,eventID:e.id,state:e.state,
+                                           sopVersion:e.sop?.version,stages:e.stages ?? []))
+                }
+            }
+        }
+        return EventTracePage(traces:rows,
+                              snapshotLastEventID:snapshotLastEventID ?? (upper>=0 ? events[upper].id : nil),
+                              nextBeforeEventID:hasOlder ? rows.last?.eventID : nil,total:total)
     }
     public func rename(id:String,name:String) throws {
         let name=name.trimmingCharacters(in:.whitespacesAndNewlines)

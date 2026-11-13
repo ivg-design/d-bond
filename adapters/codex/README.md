@@ -1,6 +1,6 @@
 # D-Bond Local Control for Codex
 
-This local Codex plugin exposes five natural-language MCP tools: list connections,
+This local Codex plugin exposes six natural-language MCP tools: check local app status, list connections,
 read a connection SOP, replace it with an expected-version check, list recent
 event traces, and inspect one trace. The tools run in Codex and connect only to
 the same-user D-Bond Unix owner socket. They do not use a service pairing secret
@@ -24,12 +24,20 @@ reversible with `codex plugin remove d-bond-local-control@d-bond-local` and
 then use the Codex plugin update/reinstall flow; do not hand-edit its cache.
 Codex may need a new chat to discover newly installed tools.
 
-The plugin's five MCP tools are the implemented **inside Codex** controls. The
+The plugin's six MCP tools are the implemented **inside Codex** controls. The
 Codex plugin listing is host-provided UI. There is no custom settings pane or
 MCP App in this package; no evidence yet shows that a host settings extension
 can safely own this local socket without adding another runtime.
 
 ## Use
+
+Call `local_status` without a connection ID to check the existing Mac install.
+It returns only `installation` (`installed`, `uninstalled`, or `unknown`) and
+`service` (`reachable`, `offline`, or `unknown`). `offline` means the app was
+found but its owner API did not answer; an older app without that API can also
+produce this state. `unknown` means discovery could not settle the answer.
+The check is explicit, bounded, and read-only; MCP startup does not probe the
+app. It does not enroll a chat or expose paths, connections, or credentials.
 
 Ask Codex to list D-Bond connections, then name one by its exact connection ID.
 Read its SOP before changing it. A missing SOP has version 0. For a new policy,
