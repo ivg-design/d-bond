@@ -15,6 +15,12 @@ before any further action. Use `report_progress` for meaningful progress and
 text is not a reply to the originating service. After reconnecting, use
 `list_pending_requests` to reconcile unfinished work without repeating effects.
 
+When the ACK includes a `read_guide`, use its bounded reads. Read the
+first owner-SOP page and pass each returned `next_request_id` to
+`get_message` until the last page. If the guide offers a comparison lookup,
+use it for the exact records under review. The connection's Rules editor is
+where the owner changes this workflow for future events.
+
 Apply the connection's owner-authored SOP, when present, from the top-level
 `metadata.dbond_owner_sop` recorded by D-Bond on the Mac. It contains a
 `version` and ordered `rules` with `id` and `text`. Use that exact version
