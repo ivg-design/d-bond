@@ -38,6 +38,12 @@ def main():
         assert owner(directory,{'op':'pair','name':'bad origin','chromeOrigin':'*'}).get('error')
         origin='chrome-extension://'+'a'*32
         assert owner(directory,{'op':'pair','name':'extension control','chromeOrigin':origin})['chromeOrigin']==origin
+        herald = owner(directory, {'op':'pair','name':'Herald / test','destination':'herald'})
+        assert herald['destination']=='herald' and herald['herald'] is True
+        peers_url=url.removesuffix('/events')+'/peers'
+        with urllib.request.urlopen(urllib.request.Request(peers_url, headers={'Authorization':'Bearer '+secret}), timeout=3) as response:
+            peers = json.load(response)['services']
+        assert {'id':herald['id'],'name':'Herald / test','paused':False} in peers
         assert owner(directory,{'op':'list'})['services'][0]['sopVersion']==1
         assert owner(directory,{'op':'get_sop','id':service})['sop']==sop
         assert owner(directory,{'op':'get_sop','id':'unknown'}).get('error')

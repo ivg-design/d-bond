@@ -9,6 +9,8 @@ swift build --package-path "$root" --product dbond-probe >/dev/null
 products=$(swift build --package-path "$root" --show-bin-path)
 swiftc -parse-as-library -I "$products" \
   "$root/Sources/DBond/Brand.swift" \
+  "$root/Sources/DBond/Login.swift" \
+  "$root/Sources/DBond/SettingsWindow.swift" \
   "$root/Sources/DBond/AgentInstallState.swift" \
   "$root/Sources/DBond/AgentSetup.swift" \
   "$root/scripts/fixtures/agent_setup/main.swift" \

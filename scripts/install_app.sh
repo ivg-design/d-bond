@@ -16,6 +16,7 @@ AGENT_LABEL="$EXPECTED_BUNDLE_ID.supervisor"
 AGENT_DIR="$HOME/Library/LaunchAgents"
 AGENT="$AGENT_DIR/$AGENT_LABEL.plist"
 DOMAIN="gui/$(id -u)"
+START_AT_LOGIN=true
 
 die() { printf 'install_app: %s\n' "$*" >&2; exit 1; }
 
@@ -45,6 +46,8 @@ if [[ "$DEST_DIR" == "$HOME/Applications" && -e "$AGENT" ]]; then
   AGENT_PROGRAM=$(/usr/libexec/PlistBuddy -c 'Print :ProgramArguments:0' "$AGENT" 2>/dev/null || true)
   [[ "$AGENT_ID" == "$AGENT_LABEL" && "$AGENT_PROGRAM" == "$DEST_APP/Contents/MacOS/DBond" ]] || \
     die "existing launch agent differs from D-Bond's expected job: $AGENT"
+  overrides=$(launchctl print-disabled "$DOMAIN") || die "cannot read the current Start at Login setting"
+  if [[ "$overrides" == *"\"$AGENT_LABEL\" => disabled"* ]]; then START_AT_LOGIN=false; fi
 fi
 
 mkdir -p "$DEST_DIR"
@@ -99,17 +102,28 @@ with pathlib.Path(path).open("wb") as stream:
 PY
   plutil -lint "$AGENT_STAGE" >/dev/null
   chmod 644 "$AGENT_STAGE"
-  if launchctl print "$DOMAIN/$AGENT_LABEL" >/dev/null 2>&1; then
-    launchctl bootout "$DOMAIN/$AGENT_LABEL"
-  fi
   mv "$AGENT_STAGE" "$AGENT"
-  launchctl enable "$DOMAIN/$AGENT_LABEL"
-  launchctl bootstrap "$DOMAIN" "$AGENT"
+  if "$START_AT_LOGIN"; then
+    if launchctl print "$DOMAIN/$AGENT_LABEL" >/dev/null 2>&1; then
+      launchctl bootout "$DOMAIN/$AGENT_LABEL"
+    fi
+    launchctl enable "$DOMAIN/$AGENT_LABEL"
+    launchctl bootstrap "$DOMAIN" "$AGENT"
+  elif launchctl print "$DOMAIN/$AGENT_LABEL" >/dev/null 2>&1; then
+    # Keep crash supervision for the current login without enabling the next one.
+    launchctl kickstart "$DOMAIN/$AGENT_LABEL" || /usr/bin/open "$DEST_APP"
+  else
+    /usr/bin/open "$DEST_APP"
+  fi
 fi
 
 printf 'Installed D-Bond at %s\n' "$DEST_APP"
 if [[ "$DEST_DIR" == "$HOME/Applications" ]]; then
-  printf 'D-Bond is supervised by launchd at login and after abnormal exits. Quit D-Bond exits normally and stays stopped until the next login.\n'
+  if "$START_AT_LOGIN"; then
+    printf 'D-Bond is supervised by launchd at login and after abnormal exits. Quit D-Bond exits normally and stays stopped until the next login.\n'
+  else
+    printf 'Start at Login remains off. D-Bond opened for this session.\n'
+  fi
   printf 'Remove any older D-Bond Open at Login item in System Settings so there is only one login launch path.\n'
 else
   printf 'This nondefault destination was packaged only; no login job was installed.\n'

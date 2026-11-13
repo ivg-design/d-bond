@@ -373,6 +373,22 @@ class DBondCLITest(unittest.TestCase):
         finally:
             server.close()
 
+    def test_herald_enrollment_reuses_durable_alias_without_session_setup(self):
+        args = dbond.parser().parse_args(["enroll", "herald-notifications", "--service", "Herald",
+                                          "--topic", "Notifications", "--destination", "herald"])
+        self.link("http://127.0.0.1:18768/v1/services/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/events")
+        pair = dict(dbond._read_pairing("test"), destination="herald")
+        dbond._save(args.alias, pair)
+        service_id = pair["endpoint"].split("/")[-2]
+        peers = [{"id":service_id, "name":"Herald / Notifications", "paused":False}]
+        with patch.object(dbond, "_peers", return_value=peers), contextlib.redirect_stdout(io.StringIO()) as output:
+            dbond.command_enroll(args)
+        result = json.loads(output.getvalue())
+        self.assertTrue(result["reused"])
+        self.assertEqual(result["destination"], "herald")
+        self.assertNotIn("listener", result)
+        self.assertNotIn("secret", result)
+
     def test_claude_title_uses_exact_session_metadata_and_custom_title_precedence(self):
         home = Path(self.tmp.name)
         session_id = "3f47c4fa-1111-4222-8333-444455556666"

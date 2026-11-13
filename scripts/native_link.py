@@ -41,18 +41,39 @@ def return_id(dbpath,service,payload):
         row=db.execute(NATIVE_MESSAGES+" AND r.sequence=?",(CHANNEL,int(match.group(1)))).fetchone()
         if not row or row[3] != service: raise ValueError('return target not owned by the service')
         return row[1]
+def herald_capability(service):
+    return {
+        'tool':'send_to_app','channel':CHANNEL,
+        'metadata':{'recipient_caller_id':CALLER,'recipient_conversation_id':service},
+        'idempotency_key':'Use one stable key per logical alert (1–128 characters). Reuse it for identical retries.',
+        'text_format':'JSON string; exactly the three fields shown in text_example',
+        'text_example':compact({'kind':'herald.notify','title':'Sample title','body':'Sample message'}),
+        'limits':{'title':{'characters':120,'utf8_bytes':480},'body':{'characters':1200,'utf8_bytes':4800},
+                  'text':'Nonblank single-line plain text, without control characters or links.'},
+        'supports_reply':False,
+        'receipt':{'send_to_app':'Bridge stored the push.','herald_accepted':'Herald accepted it locally; display unverified.',
+                   'herald_unconfirmed':'Check Herald History before retrying.'}
+    }
+
 def paired_connections(ledger_path):
-    """Take one snapshot. Only names, addresses and paused status leave the Mac."""
+    """Expose public addresses and supported Dot commands for paired services."""
     with contextlib.closing(sqlite3.connect(ledger_path.as_uri()+'?mode=ro',uri=True)) as db:
         rows=db.execute("""
-            SELECT id, json_extract(body,'$.name'), json_extract(body,'$.paused')
+            SELECT id, json_extract(body,'$.name'), json_extract(body,'$.paused'), json_extract(body,'$.destination')
             FROM services
             WHERE (json_extract(body,'$.destination') IN ('dot','herald') OR json_extract(body,'$.herald')=1)
               AND json_extract(body,'$.id')=id
             ORDER BY json_extract(body,'$.name') COLLATE NOCASE, id
         """).fetchall()
-    return {key:{'id':key,'name':name,'paused':paused not in (None,0)}
-            for key,name,paused in rows if UUID.fullmatch(key) and isinstance(name,str)}
+    directory={}
+    for key,name,paused,destination in rows:
+        if not UUID.fullmatch(key) or not isinstance(name,str):
+            continue
+        entry={'id':key,'name':name,'paused':paused not in (None,0)}
+        if destination=='herald':
+            entry['capabilities']={'herald.notify':herald_capability(key)}
+        directory[key]=entry
+    return directory
 
 def conversation_target(directory,source,recipient):
     if not UUID.fullmatch(recipient) or any(key not in directory or directory[key]['paused'] for key in (source,recipient)):

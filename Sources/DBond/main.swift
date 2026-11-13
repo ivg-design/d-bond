@@ -1,12 +1,12 @@
 import AppKit
 import DBondCore
 import Foundation
-import ServiceManagement
 import Darwin
 
 @MainActor
 final class MenuController: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
+    private lazy var settings = SettingsWindowController()
     private var currentMenu: NSMenu?
     private var hub: Hub?
     private var connectionsWindow: ConnectionsWindowController?
@@ -15,6 +15,7 @@ final class MenuController: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         NSApp.applicationIconImage = Brand.app
+        installSettingsShortcut()
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem.button {
             if let url = Bundle.main.url(forResource: "d-bond-menu-icon", withExtension: "svg"),
@@ -35,10 +36,13 @@ final class MenuController: NSObject, NSApplicationDelegate {
             hub = try Hub()
             if let hub { ownerSocket = try? OwnerSocket(hub:hub) }
             refreshMenu()
-            if CommandLine.arguments.contains("--connections") || hub?.snapshot().services.isEmpty == true { showConnections() }
+            if GeneralPreferences.shouldOpenConnections(isFirstSetup: hub?.snapshot().services.isEmpty == true,
+                                                        arguments: CommandLine.arguments) {
+                showConnections()
+            }
         } catch {
             setMenu([NSMenuItem(title: "D-Bond could not start: \(error.localizedDescription)", action: nil, keyEquivalent: ""),
-                     NSMenuItem.separator(), quitItem()])
+                     NSMenuItem.separator(), settingsItem(), quitItem()])
         }
     }
 
@@ -54,7 +58,7 @@ final class MenuController: NSObject, NSApplicationDelegate {
         guard let hub else { return }
         let snapshot = hub.snapshot()
         let menu = NSMenu()
-        let title = disabled("D-Bond")
+        let title = disabled("D-Bond · " + GeneralPreferences.versionDescription())
         title.image = Brand.app?.copy() as? NSImage
         title.image?.size = NSSize(width:20,height:20)
         menu.addItem(title)
@@ -64,9 +68,7 @@ final class MenuController: NSObject, NSApplicationDelegate {
         menu.addItem(.separator())
         menu.addItem(action("Open Connections…", #selector(showConnections)))
         menu.addItem(.separator())
-        let login = action("Start at Login", #selector(toggleStartAtLogin))
-        login.state = LoginRegistration.isEnabled ? .on : .off
-        menu.addItem(login)
+        menu.addItem(settingsItem())
         menu.addItem(.separator())
         menu.addItem(quitItem())
         currentMenu = menu
@@ -233,17 +235,29 @@ final class MenuController: NSObject, NSApplicationDelegate {
         }
     }
 
-    @objc private func toggleStartAtLogin() {
-        do {
-            try LoginRegistration.setEnabled(!LoginRegistration.isEnabled)
-            refreshMenu()
-            if !LoginRegistration.usesSupervisor && SMAppService.mainApp.status == .requiresApproval {
-                showError("Start at Login needs approval", "macOS requires approval in System Settings → General → Login Items. D-Bond is not yet enabled to start at login.")
-            }
-        } catch {
-            refreshMenu()
-            showError("Could not change Start at Login", error.localizedDescription)
+    private func settingsItem() -> NSMenuItem {
+        let item = action("Settings…", #selector(showSettings))
+        item.keyEquivalent = ","
+        item.keyEquivalentModifierMask = [.command]
+        return item
+    }
+
+    private func installSettingsShortcut() {
+        let menu = NSApp.mainMenu ?? NSMenu()
+        let appItem: NSMenuItem
+        if let existing = menu.items.first, existing.submenu != nil {
+            appItem = existing
+        } else {
+            appItem = NSMenuItem()
+            appItem.submenu = NSMenu(title: "D-Bond")
+            menu.insertItem(appItem, at: 0)
         }
+        appItem.submenu?.insertItem(settingsItem(), at: 0)
+        NSApp.mainMenu = menu
+    }
+
+    @objc private func showSettings() {
+        settings.present()
     }
 
     private func showError(_ title: String, _ body: String) {

@@ -50,7 +50,7 @@ public final class OwnerSocket {
                         guard let name=obj["name"] as? String, Set(obj.keys).isSubset(of:["op","name","sop","chromeOrigin","destination"]),
                               obj["chromeOrigin"] == nil || obj["chromeOrigin"] is String else {throw Fault.message("Invalid pairing request.")}
                         let destination=obj["destination"] as? String ?? "dot"
-                        guard ["dot","peer"].contains(destination) else { throw Fault.message("Invalid pairing destination.") }
+                        guard ["dot","peer","herald"].contains(destination) else { throw Fault.message("Invalid pairing destination.") }
                         reply=try JSONEncoder().encode(hub.pair(name:name,destination:destination,chromeOrigin:obj["chromeOrigin"] as? String,sop:try sop(obj["sop"])))
                     case "rename":
                         guard Set(obj.keys)==["op","id","name"],let id=obj["id"] as? String,let name=obj["name"] as? String else {throw Fault.message("Invalid rename request.")}

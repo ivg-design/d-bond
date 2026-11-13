@@ -40,6 +40,36 @@ struct AgentSetupFixture {
                 "Desktop must show its own newer package")
         require(AgentSetup.availableDesktopUpdate(installed: "0.1.8", installers: installers) == nil,
                 "A current Desktop extension must stay current when the Code plugin is newer")
+        let suite = "dbond.fixture.settings." + UUID().uuidString
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        require(!GeneralPreferences.shouldOpenConnections(isFirstSetup: false, arguments: [], defaults: defaults),
+                "Existing installations stay in the menu by default")
+        require(GeneralPreferences.shouldOpenConnections(isFirstSetup: true, arguments: [], defaults: defaults),
+                "First setup opens Connections")
+        require(GeneralPreferences.shouldOpenConnections(isFirstSetup: false, arguments: ["--connections"], defaults: defaults),
+                "Explicit Connections launch still opens the window")
+        let settings = SettingsWindowController(defaults: defaults)
+        settings.present()
+        guard let root = settings.window?.contentView,
+              let checkbox = find("settings.openConnectionsAtLaunch", in: root) as? NSButton else {
+            fatalError("Settings is missing its startup preference")
+        }
+        checkbox.performClick(nil)
+        settings.close()
+        let reopened = SettingsWindowController(defaults: UserDefaults(suiteName: suite)!)
+        reopened.present()
+        guard let content = reopened.window?.contentView,
+              let restored = find("settings.openConnectionsAtLaunch", in: content) as? NSButton else {
+            fatalError("Reopened Settings is missing its startup preference")
+        }
+        require(restored.state == .on &&
+                    GeneralPreferences.shouldOpenConnections(isFirstSetup: false, arguments: [], defaults: defaults),
+                "Checking Open Connections at launch must persist and drive startup")
+        restored.performClick(nil)
+        require(!GeneralPreferences.shouldOpenConnections(isFirstSetup: false, arguments: [], defaults: defaults),
+                "Unchecking Open Connections at launch restores menu-only startup")
+        reopened.close()
         let hub = try Hub(directory: directory, port: 0)
         var first: NSWindow?
         for iteration in 0..<4 {
@@ -80,6 +110,6 @@ struct AgentSetupFixture {
         require(!codex.stringValue.isEmpty && !claude.stringValue.isEmpty && !desktop.stringValue.isEmpty,
                 "Installation status labels did not update")
         require(hub.snapshot().eventCount == 0, "Reopen sent an event")
-        print("PASS: Agent Setup 5 native open/close cycles, retained window, scroll reset, read-only status labels, zero sends")
+        print("PASS: Agent Setup 5 native open/close cycles, retained window, scroll reset, Desktop version, Settings preference persistence and startup behavior, zero sends")
     }
 }

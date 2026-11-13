@@ -6,7 +6,7 @@ On a Mac with Swift 5.9+ and macOS 13 or later, run the following from the sourc
 bash scripts/install_app.sh
 ```
 
-Quit an older running D-Bond before upgrading. If it was already listed under **System Settings → General → Login Items & Extensions → Open at Login**, remove that older entry before installing; the installer starts one per-user launchd job instead. The job opens D-Bond at login and restarts it after an abnormal exit. **Quit D-Bond** exits normally and keeps it stopped until the next login. **Start at Login** in the app menu enables or disables the installed job. The installer does not remove pairings, credentials or receipts.
+Quit an older running D-Bond before upgrading. If it was already listed under **System Settings → General → Login Items & Extensions → Open at Login**, remove that older entry before installing; the installer starts one per-user launchd job instead. The job opens D-Bond at login and restarts it after an abnormal exit. **Quit D-Bond** exits normally and keeps it stopped until the next login. In **D-Bond → Settings…** (⌘,), **Start D-Bond at login** enables or disables the installed job. **Open Connections at launch** opens the connections window on startup. A first setup opens Connections automatically. The menu and Settings both show the running version and build. The installer does not remove pairings, credentials or receipts.
 
 The app runs in the menu bar. Opening it again brings up **Connections**. A fresh installation can test **Local demo echo** immediately. To reach your actual Dot you also need your own compatible Dot Bridge Transport and its single native `d-bond` subscription. Installing the Mac app alone doesn't create that account connection.
 
@@ -14,11 +14,19 @@ The app runs in the menu bar. Opening it again brings up **Connections**. A fres
 
 On an agent connection row, **Connect session…** shows the direct listener, Dot stream, and wake-check state separately for that exact connection ID. Registration checks the paired session once. The session acknowledges the wake message by its broker sequence. D-Bond keeps the receipt across restarts and shows live listener status separately. An explicit retry starts a fresh check. Codex registration belongs to the exact chat through Local Control `enroll_agent`; the per-chat host listener queues event pointers, and the chat must still fetch and answer messages. The Claude `session-listen` command shown in the dialog is a repair path for its exact host Monitor, which expires with the session.
 
+## App settings
+
+Choose **Settings…** from the D-Bond menu or press **⌘,** while a D-Bond window is active. **Start at Login** controls automatic startup on this Mac. **Open Connections at launch** controls whether the Connections window opens each time. The menu and Settings both show the installed version and build.
+
 ## Connect a service
 
 2. Select the destination. For a browser extension that calls the broker directly, enter the exact extension ID from Chrome. Copy the endpoint and one-time secret into that service’s local settings. Existing connections have a **Setup** button with instructions. A pairing is saved even when the service is offline; in the window, “connected” means a receiver is listening.
 3. Your service posts a stable event ID and a JSON payload to its loopback endpoint. For replies, it opens the authenticated event stream. Its integration decides what to do when a reply arrives. A public webhook uses an authenticated receiver in front of this loopback connection.
 
+
+## Connect Herald
+
+In **Open Connections… → Add Connection…**, choose **Herald notification** and use **Herald / Notifications** for the name. If the connection is already listed, reuse it. Dot receives the active address and plain-text command in the directory on its next D-Bond request. An addressed alert goes through the existing D-Bond bridge to Herald on the Mac. The local receipt confirms Herald accepted the banner. Its History shows what happened to it. Interactive questions still use Herald’s reply-capable connector.
 
 ## Attach your SOP once
 

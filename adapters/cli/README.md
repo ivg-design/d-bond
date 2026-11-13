@@ -38,12 +38,18 @@ owner-only same-user Unix socket:
 dbond enroll render --service Renderer --topic "Render watcher"
 ```
 
-The menu and Dot both see `Renderer / Render watcher`; the shell uses `render`.
-Enrollment refuses an alias
-that already exists, asks the app to create a Dot-destination pairing, then saves
-the returned credential in the private local store. It does not read secrets
-from another pairing. To expose the command on `PATH`, symlink this executable
-to `~/.local/bin/dbond`.
+The menu and Dot both see `Renderer / Render watcher`. The shell uses `render`.
+Enrollment defaults to Dot and saves the pairing privately on this Mac. Use
+`--destination peer` for direct session messaging or `--destination herald` to
+expose the local Herald banner receiver to Dot.
+
+```sh
+dbond enroll herald-notifications --service Herald --topic Notifications --destination herald
+```
+
+Running this Herald command again reuses the same active pairing. D-Bond
+handles delivery to Herald without a chat listener. To expose the CLI on
+`PATH`, symlink this executable to `~/.local/bin/dbond`.
 
 For a Claude or Codex session, provide its exact UUID and a title reported by
 the host:

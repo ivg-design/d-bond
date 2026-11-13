@@ -15,7 +15,6 @@ enum LoginRegistration {
 
     static var isEnabled: Bool {
         if usesSupervisor {
-            guard launchctl("print", "\(domain)/\(label)").status == 0 else { return false }
             let result = launchctl("print-disabled", domain)
             guard result.status == 0 else { return false }
             return !result.output.contains("\"\(label)\" => disabled")
@@ -25,11 +24,6 @@ enum LoginRegistration {
 
     static func setEnabled(_ enabled: Bool) throws {
         if usesSupervisor {
-            guard launchctl("print", "\(domain)/\(label)").status == 0 else {
-                throw NSError(domain: "D-Bond Login", code: 1, userInfo: [
-                    NSLocalizedDescriptionKey: "D-Bond's launch job is installed but not loaded. Run the installer again after quitting the app."
-                ])
-            }
             let result = launchctl(enabled ? "enable" : "disable", "\(domain)/\(label)")
             guard result.status == 0 else {
                 throw NSError(domain: "D-Bond Login", code: Int(result.status), userInfo: [

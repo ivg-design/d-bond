@@ -472,6 +472,13 @@ public final class Hub: @unchecked Sendable {
         guard ledger.services.contains(where:{$0.id==service}) else { throw Fault.message("Service connection no longer exists.") }
         return Array(ledger.events.reversed().lazy.compactMap { self.trace($0,viewedBy:service) }.prefix(max(0,min(limit,100))))
     }
+    /// Exact persisted event IDs for a paired service, used to reconcile an
+    /// external intake ledger without reading this store's WAL from the UI.
+    public func storedEventIDs(service:String) throws -> Set<String> {
+        lock.lock(); defer { lock.unlock() }
+        guard ledger.services.contains(where:{$0.id==service}) else { throw Fault.message("Service connection no longer exists.") }
+        return Set(ledger.events.lazy.filter { $0.service == service }.map(\.id))
+    }
     /// Cursor IDs refer to retained rows, so appends do not shift pages. The first
     /// call captures an upper bound; pass it back on every subsequent page.
     public func eventTracePage(service:String,through snapshotLastEventID:String? = nil,

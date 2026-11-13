@@ -179,6 +179,19 @@ class NativeTest(unittest.TestCase):
             names=raw['metadata']['dbond_connections']
             self.assertEqual(names['sender']['name'],'source')
             self.assertEqual(names['recipient']['name'],'recipient')
+            self.assertEqual(set(names['sender']), {'id','name','paused'})
+            item=next(row for row in names['directory'] if row['id']==recipient)
+            self.assertEqual(item,names['recipient'])
+            cap=item['capabilities']['herald.notify']
+            self.assertEqual((cap['tool'],cap['channel']), ('send_to_app','d-bond'))
+            self.assertEqual(cap['metadata'],{'recipient_caller_id':'d-bond','recipient_conversation_id':recipient})
+            self.assertEqual(json.loads(cap['text_example']),{'kind':'herald.notify','title':'Sample title','body':'Sample message'})
+            self.assertEqual(cap['limits']['title'],{'characters':120,'utf8_bytes':480})
+            self.assertEqual(cap['limits']['body'],{'characters':1200,'utf8_bytes':4800})
+            self.assertFalse(cap['supports_reply'])
+            self.assertIn('stable',cap['idempotency_key'])
+            self.assertIn('herald_accepted',cap['receipt'])
+            self.assertLess(len(n.compact(cap).encode('utf-8')),1024)
             self.assertEqual({row['id'] for row in names['directory']},{source,recipient})
             with contextlib.closing(sqlite3.connect(ledger)) as db:
                 db.execute('create table messages(channel,idempotency_key,metadata)')

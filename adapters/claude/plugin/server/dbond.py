@@ -370,8 +370,18 @@ def command_link(args) -> None:
 
 
 def command_enroll(args) -> None:
+    destination = "peer" if getattr(args, "direct", False) else getattr(args, "destination", None)
+    if destination == "herald" and (getattr(args, "client", None) or getattr(args, "session_id", None)):
+        fail("Choose a Herald service name to connect alerts, or use a session destination for an AI chat.")
     path = _alias_path(args.alias)
     if path.exists() or path.is_symlink():
+        if destination == "herald" and not path.is_symlink():
+            pair = _read_pairing(args.alias)
+            if pair.get("destination") == "herald":
+                own_id = pair["endpoint"].split("/services/", 1)[1].split("/", 1)[0].lower()
+                if any(row.get("id") == own_id and row.get("name") == enrollment_name(args) for row in _peers(pair)):
+                    print(json.dumps(_enrollment_payload(args, pair, reused=True), ensure_ascii=False))
+                    return
         session_id = getattr(args, "session_id", None)
         if (getattr(args, "client", None) == "claude" and isinstance(session_id, str)
                 and SESSION_ID_RE.fullmatch(session_id) and not path.is_symlink()):
@@ -426,8 +436,8 @@ def command_enroll(args) -> None:
             client.connect(str(OWNER_SOCKET))
             name = enrollment_name(args)
             frame = {"op": "pair", "name": name}
-            if getattr(args, "direct", False):
-                frame["destination"] = "peer"
+            if destination is not None:
+                frame["destination"] = destination
             chrome_id = getattr(args, "chrome_id", None)
             if chrome_id is not None:
                 if not re.fullmatch(r"[a-p]{32}", chrome_id):
@@ -472,6 +482,9 @@ def _enrollment_payload(args, pairing: dict, *, reused: bool) -> dict:
         pairing = _read_pairing(args.alias)
     result = {"linked": args.alias, "endpoint": pairing["endpoint"],
               "reused": reused, "pairing_state": "saved"}
+    if pairing.get("destination") == "herald":
+        result["destination"] = "herald"
+        return result
     result["listener"] = _enrollment_listener(args, pairing)
     if client in ("claude", "codex") and isinstance(session_id, str) and SESSION_ID_RE.fullmatch(session_id):
         ready = client == "codex" and result["listener"].get("ready") is True
@@ -500,7 +513,7 @@ def _enrollment_listener(args, pairing: dict) -> dict:
         except Exception as exc:
             return {"state": "blocked", "reason": type(exc).__name__,
                     "instruction": "Pairing was saved, but the Codex host listener could not be attached. Do not report the session as connected."}
-    return session_listener_guidance(args.alias, direct_only=bool(getattr(args, "direct", False)))
+    return session_listener_guidance(args.alias, direct_only=pairing.get("destination") == "peer" or bool(getattr(args, "direct", False)))
 
 
 def _valid_title(value: str | None) -> str | None:
@@ -1097,7 +1110,9 @@ def parser() -> argparse.ArgumentParser:
     enroll.add_argument("--client", choices=("claude", "codex"), help="local client identity for the session")
     enroll.add_argument("--session-id", help="exact client session UUID; never inferred from nearby chats")
     enroll.add_argument("--title", help="title supplied by the host; preferred over local metadata")
-    enroll.add_argument("--direct", action="store_true", help="create a direct-only pairing; existing Dot pairings can also use direct messaging")
+    routes = enroll.add_mutually_exclusive_group()
+    routes.add_argument("--destination", choices=("dot", "peer", "herald"), help="route to Dot, direct sessions, or local Herald notifications")
+    routes.add_argument("--direct", action="store_true", help="create a direct-only pairing; existing Dot pairings can also use direct messaging")
     enroll.set_defaults(run=command_enroll)
     session_binding_cmd = sub.add_parser("session-binding", help="resolve one exact local host session to its private pairing without showing credentials")
     session_binding_cmd.add_argument("session_id", help="exact host session UUID")
