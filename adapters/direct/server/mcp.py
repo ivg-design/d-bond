@@ -44,7 +44,7 @@ TOOLS = [
     tool("answer_direct_message", "Answer a received direct message; to must be its exact sender ID.",
          {"alias": STRING, "to": STRING, "in_reply_to": STRING, "text": STRING, "message_id": STRING},
          ("alias", "to", "in_reply_to", "text")),
-    tool("ask_dot", "Ask Dot through the existing correlated event route; an optional recipient is Dot mediated.",
+    tool("ask_dot", "Ask Dot, optionally on behalf of an addressed recipient. When the user asks for a plain notification via Herald, pass the active Herald / Notifications connection in to so Dot receives its owner rule.",
          {"alias": STRING, "text": STRING, "to": STRING, "message_id": STRING,
           "timeout": {"type": "integer", "minimum": 1, "maximum": 300}}, ("alias", "text")),
     tool("wait_for_dot_push", "Wait for one authenticated Dot push while this tool call is active; does not wake an idle desktop chat.",

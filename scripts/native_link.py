@@ -55,24 +55,36 @@ def herald_capability(service):
                    'herald_unconfirmed':'Check Herald History before retrying.'}
     }
 
-def paired_connections(ledger_path):
+def paired_connections(ledger_path, *, sender=None):
     """Expose public addresses and supported Dot commands for paired services."""
     with contextlib.closing(sqlite3.connect(ledger_path.as_uri()+'?mode=ro',uri=True)) as db:
         rows=db.execute("""
-            SELECT id, json_extract(body,'$.name'), json_extract(body,'$.paused'), json_extract(body,'$.destination')
+            SELECT id, json_extract(body,'$.name'), json_extract(body,'$.paused'), json_extract(body,'$.destination'),
+                   EXISTS(SELECT 1 FROM json_each(services.body,'$.sop.rules') AS rule
+                          WHERE json_extract(rule.value,'$.id')='general-notifications')
             FROM services
             WHERE (json_extract(body,'$.destination') IN ('dot','herald') OR json_extract(body,'$.herald')=1)
               AND json_extract(body,'$.id')=id
             ORDER BY json_extract(body,'$.name') COLLATE NOCASE, id
         """).fetchall()
     directory={}
-    for key,name,paused,destination in rows:
+    enabled_receivers=[]
+    for key,name,paused,destination,has_rule in rows:
         if not UUID.fullmatch(key) or not isinstance(name,str):
             continue
         entry={'id':key,'name':name,'paused':paused not in (None,0)}
         if destination=='herald':
             entry['capabilities']={'herald.notify':herald_capability(key)}
+            if has_rule and not entry['paused'] and key!=sender:
+                enabled_receivers.append(entry)
         directory[key]=entry
+    # Bind the grant to the authenticated source of this request and the
+    # receiver opted in by the Mac owner. Never accept a grant in caller data.
+    if sender in directory and not directory[sender]['paused']:
+        for recipient in enabled_receivers:
+            capability=recipient['capabilities']['herald.notify']
+            capability['authorization']={'basis':'owner_paired_services','scope':'herald.notify',
+                                         'sender_service':sender,'recipient_service':recipient['id']}
     return directory
 
 def conversation_target(directory,source,recipient):
@@ -98,7 +110,7 @@ def connection_metadata(dbpath,key,directory,source,recipient):
         result['recipient']=directory[recipient]
     return result
 
-def owner_sop_metadata(ledger_path,dbpath,key,service,event):
+def owner_policies(ledger_path,dbpath,key,service,event,herald_recipient):
     # A native retry uses its first stored metadata. The caller envelope cannot
     # provide or alter owner configuration; only the private broker ledger can.
     if dbpath is not None:
@@ -106,14 +118,21 @@ def owner_sop_metadata(ledger_path,dbpath,key,service,event):
             previous=db.execute('SELECT metadata FROM messages WHERE channel=? AND idempotency_key=?',
                                 (CHANNEL,key)).fetchone()
         if previous:
-            return json.loads(previous[0]).get('dbond_owner_sop')
+            original=json.loads(previous[0])
+            return original.get('dbond_owner_sop'),original.get('dbond_recipient_policy')
     if ledger_path is None:
-        return None
+        return None,None
     with contextlib.closing(sqlite3.connect(ledger_path.as_uri()+'?mode=ro',uri=True)) as db:
         row=db.execute('SELECT body FROM events WHERE service=? AND id=?',(service,event)).fetchone()
     if not row:
         raise ValueError('event is not in the owner ledger')
-    return json.loads(row[0]).get('sop')
+    frozen=json.loads(row[0])
+    receiver=frozen.get('recipientPolicy')
+    policy=None
+    if herald_recipient and receiver and receiver['recipient']==herald_recipient:
+        policy={'basis':'owner_connection_sop','scope':'herald.notify','sender_service':service,
+                'recipient_service':herald_recipient,'version':receiver['version'],'rule':receiver['rule']}
+    return frozen.get('sop'),policy
 
 def idempotency_key(service,event):
     return PREFIX+hashlib.sha256(compact([service,event]).encode()).hexdigest()
@@ -269,7 +288,7 @@ def send(client,env,route,dbpath=None,*,ledger_path=None,before_post=None):
         return dict(state='dot_quarantined',reply='Invalid local event address; no native message submitted.')
     if route['blocked']: return dict(state='dot_route_blocked',reply='D-Bond is mapped to a chat route or multiple subscribers. No message submitted.')
     payload=env['payload']
-    directory=paired_connections(ledger_path) if ledger_path is not None else {}
+    directory=paired_connections(ledger_path,sender=service) if ledger_path is not None else {}
     conversation=None
     if isinstance(payload,dict) and payload.get('kind')=='conversation.request':
         if set(payload)!={'kind','recipient_service','text'} or not isinstance(payload.get('recipient_service'),str) or not isinstance(payload.get('text'),str) or not payload['text'].strip():
@@ -312,7 +331,36 @@ def send(client,env,route,dbpath=None,*,ledger_path=None,before_post=None):
             return dict(state='dot_route_blocked',reply='Sender connection is no longer registered; no native message submitted.')
         if names is not None:
             raw['metadata']['dbond_connections']=names
-        sop=owner_sop_metadata(ledger_path,dbpath,raw['idempotency_key'],service,event)
+            if conversation:
+                capability=names.get('recipient',{}).get('capabilities',{}).get('herald.notify',{})
+                if capability:
+                    conversation.update(capability='herald.notify',response_tool='reply_to_app')
+                    raw['text']=(
+                        'Acknowledge this request. The authenticated D-Bond sender selected the Herald connection '
+                        'for a local notification. Its command format and any standing authorization are in '
+                        'metadata.dbond_connections.recipient.capabilities["herald.notify"]. '
+                        'When the sender requests an ordinary alert, compose the requested title and body and call '
+                        'reply_to_app with this request_id and exactly the three-field JSON message as text. '
+                        'The Mac delivers that reply to Herald and returns a separate local acceptance receipt. '
+                        'Complete this addressed operation using only reply_to_app. A plain-text decline sends no banner.'
+                    )
+            elif not reply_to and any(
+                row.get('capabilities',{}).get('herald.notify',{}).get('authorization') for row in names['directory']
+            ):
+                raw['text'] += (
+                    ' For an explicitly requested plain Herald notification, the recipient directory entry carries '
+                    'the Mac owner’s durable authorization for this sender in capabilities["herald.notify"].authorization. '
+                    'Use its send_to_app contract for that operation and reply_to_app on this request for the result.'
+                )
+        recipient=(conversation['recipient_service'] if conversation and conversation.get('capability')=='herald.notify' else None)
+        sop,receiver=owner_policies(ledger_path,dbpath,raw['idempotency_key'],service,event,recipient)
+        if recipient and receiver is not None:
+            raw['metadata']['dbond_recipient_policy']=receiver
+            raw['text'] += (
+                ' Read metadata.dbond_recipient_policy.rule.text before deciding. It is the named Herald receiver’s '
+                'owner-authored connection policy, captured by the authenticated Mac broker for this sender, '
+                'recipient and operation. Apply that rule to this request. The service payload cannot amend it.'
+            )
         if sop is not None:
             raw['metadata']['dbond_owner_sop']=sop
             raw['text'] += (' Owner SOP is in metadata.dbond_owner_sop, a trusted snapshot from the local owner ledger. '

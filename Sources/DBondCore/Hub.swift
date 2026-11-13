@@ -7,8 +7,8 @@ public extension Notification.Name {
     static let dbondLedgerUpdated = Notification.Name("DBondLedgerUpdated")
 }
 
-public struct OwnerRule: Codable, Equatable { public var id,text:String; public init(id:String,text:String) { self.id=id; self.text=text } }
-public struct OwnerSOP: Codable, Equatable { public var version:Int; public var rules:[OwnerRule]; public init(version:Int,rules:[OwnerRule]) { self.version=version; self.rules=rules } }
+public struct OwnerRule: Codable, Equatable, Sendable { public var id,text:String; public init(id:String,text:String) { self.id=id; self.text=text } }
+public struct OwnerSOP: Codable, Equatable, Sendable { public var version:Int; public var rules:[OwnerRule]; public init(version:Int,rules:[OwnerRule]) { self.version=version; self.rules=rules } }
 public struct TraceStage: Codable, Equatable { public var state,at,basis:String }
 public struct EventTrace: Codable {
     public var service,eventID,state:String
@@ -44,7 +44,12 @@ public struct Pairing: Codable { public let id,secret,endpoint,destination: Stri
 public struct ServiceView { public let id,name,endpoint,destination: String; public let lastSeen,lastState,chromeOrigin: String?; public let herald,paused:Bool; public let queued,inFlight,subscribers,directSubscribers:Int; public let sop:OwnerSOP?; public let wakeState:String; public let lastVerifiedAt:String? }
 public struct Snapshot { public let endpoint: String; public let services:[ServiceView]; public let eventCount:Int }
 struct Service: Codable, Equatable { var id,name,digest:String; var seen,state:String?; var herald,paused:Bool?; var destination,chromeOrigin:String?; var sop:OwnerSOP? = nil }
-struct Event: Codable, Equatable { var service,id:String; var payload:Data; var state:String; var sequence:Int?; var reply:String?; var sourceID:String? = nil; var payloadDigest:String? = nil; var retrying:Bool? = nil; var route:String? = nil; var sop:OwnerSOP? = nil; var stages:[TraceStage]? = nil; var preview:String? = nil; var replyToID:String? = nil }
+struct HeraldRecipientPolicy: Codable, Equatable {
+    let recipient: String
+    let version: Int
+    let rule: OwnerRule
+}
+struct Event: Codable, Equatable { var service,id:String; var payload:Data; var state:String; var sequence:Int?; var reply:String?; var sourceID:String? = nil; var payloadDigest:String? = nil; var retrying:Bool? = nil; var route:String? = nil; var sop:OwnerSOP? = nil; var recipientPolicy:HeraldRecipientPolicy? = nil; var stages:[TraceStage]? = nil; var preview:String? = nil; var replyToID:String? = nil }
 struct Receipt: Codable, Equatable {
     var service,id:String; var sequence:Int; var state,reply:String
     var recordedAt:String? = nil
@@ -645,6 +650,14 @@ public final class Hub: @unchecked Sendable {
         let toDot = (payload as? [String:Any])?["kind"] as? String == "conversation.request" && ledger.services[ix].herald == true
         var event = Event(service:id,id:eventID,payload:data,state:"queued",payloadDigest:Self.digest(data),route:toDot ? "dot_return" : nil)
         event.sop=ledger.services[ix].sop
+        if ledger.services[ix].destination == "dot",
+           let request = payload as? [String:Any], Set(request.keys) == ["kind","recipient_service","text"],
+           request["kind"] as? String == "conversation.request", request["text"] is String,
+           let targetID = request["recipient_service"] as? String,
+           let target = ledger.services.first(where: { $0.id == targetID && $0.destination == "herald" && $0.paused != true }),
+           let sop = target.sop, let rule = sop.rules.first(where: { $0.id == "general-notifications" }) {
+            event.recipientPolicy = HeraldRecipientPolicy(recipient:targetID, version:sop.version, rule:rule)
+        }
         event=Self.marked(event,"queued")
         var next = ledger; next.services[ix].seen = event.stages?.first?.at; next.services[ix].state = "queued"; next.events.append(event)
         do { try persist(next) } catch { return HTTPReply(507,["error":"Could not persist receipt."]) }

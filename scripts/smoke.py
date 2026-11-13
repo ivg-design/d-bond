@@ -110,6 +110,14 @@ def run():
             time.sleep(.03)
         assert any(row["id"]=="@dot:103" and row["state"]=="herald_rejected" for row in push_rows)
         assert len(requests)==2
+        tell(p,"inject-push "+h["id"]+" @dot:104 I cannot send that notification.")
+        deadline=time.monotonic()+5
+        while time.monotonic()<deadline:
+            push_rows=call(h["endpoint"]+"/stream?after=0",h["secret"])[1]["messages"]
+            if any(row["id"]=="@dot:104" and row["state"]=="herald_rejected" for row in push_rows): break
+            time.sleep(.03)
+        assert any(row["id"]=="@dot:104" and row["state"]=="herald_rejected" for row in push_rows)
+        assert len(requests)==2
         assert tell(p,"pause "+h["id"])["paused"]
         tell(p,"inject-push "+h["id"]+" @dot:102 "+push)
         time.sleep(.15)

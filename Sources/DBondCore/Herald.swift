@@ -39,6 +39,18 @@ private final class HeraldHTTPResult: @unchecked Sendable {
     }
 }
 
+public extension OwnerSOP {
+    static func pairedHeraldNotifications(destination: String, enabled: Bool) -> OwnerSOP? {
+        guard enabled, destination == "herald" else { return nil }
+        let text = """
+        Any active service paired on this Mac may ask Dot in its own name to send me a plain Herald notification.
+        Use the authenticated source and Herald recipient named by D-Bond. This rule authorizes that operation without a separate request in Dot chat.
+        For an addressed request, return the title and body using the delivery method specified by the broker. Send one notification per request.
+        """
+        return OwnerSOP(version: 1, rules: [OwnerRule(id: "general-notifications", text: text)])
+    }
+}
+
 enum HeraldSender: String {
     case service = "agent.dbond"
     case dot = "cloud.chatgpt"

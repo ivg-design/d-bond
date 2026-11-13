@@ -128,6 +128,8 @@ class NativeTest(unittest.TestCase):
             db.execute('insert into services values(?,?)',(source,json.dumps(source_row)))
             if include_recipient and recipient!=source:
                 target={'id':recipient,'name':'recipient','destination':recipient_destination}
+                if recipient_destination=='herald':
+                    target['sop']={'version':1,'rules':[{'id':'general-notifications','text':'Owner rule for alerts.'}]}
                 if recipient_paused is not None: target['paused']=recipient_paused
                 db.execute('insert into services values(?,?)',(recipient,json.dumps(target)))
             for event_id in ('conversation-case','sop-case'):
@@ -191,7 +193,9 @@ class NativeTest(unittest.TestCase):
             self.assertFalse(cap['supports_reply'])
             self.assertIn('stable',cap['idempotency_key'])
             self.assertIn('herald_accepted',cap['receipt'])
-            self.assertLess(len(n.compact(cap).encode('utf-8')),1024)
+            self.assertLess(len(n.compact(cap).encode('utf-8')),1200)
+            self.assertEqual(cap['authorization'],{'basis':'owner_paired_services','scope':'herald.notify',
+                                                    'sender_service':source,'recipient_service':recipient})
             self.assertEqual({row['id'] for row in names['directory']},{source,recipient})
             with contextlib.closing(sqlite3.connect(ledger)) as db:
                 db.execute('create table messages(channel,idempotency_key,metadata)')
@@ -203,9 +207,9 @@ class NativeTest(unittest.TestCase):
             self.assertEqual(raw['metadata']['dbond_conversation_route'],{
                 'source_service':source,'recipient_service':recipient,
                 'recipient_address':{'recipient_caller_id':n.CALLER,'recipient_conversation_id':recipient},
-                'delivery':'addressed_reply','scope':'conversation'})
-            self.assertIn('Pairing establishes two-way communication',raw['text'])
-            self.assertIn('Mac delivers your exact reply',raw['text'])
+                'delivery':'addressed_reply','scope':'conversation','capability':'herald.notify','response_tool':'reply_to_app'})
+            self.assertIn('Mac delivers that reply to Herald',raw['text'])
+            self.assertIn('using only reply_to_app',raw['text'])
             self.assertEqual(raw['metadata']['conversation_id'],source)
             sent=len(client.sent)
             # Paused either endpoint, a deleted target, or a non-Dot destination fails closed.
@@ -223,6 +227,80 @@ class NativeTest(unittest.TestCase):
             self.assertEqual(n.send(client,dict(env,payload=dict(env['payload'],recipient_service=source)),blocked_route,ledger_path=ledger)['state'],'dot_stored')
             self.assertEqual(client.sent[-1]['metadata']['dbond_conversation_route']['recipient_address'],
                              {'recipient_caller_id':n.CALLER,'recipient_conversation_id':source})
+    def test_addressed_receiver_policy_is_exact_scoped_and_stable_across_retries(self):
+        source='11111111-1111-4111-8111-111111111111'
+        recipient='22222222-2222-4222-8222-222222222222'
+        env={'service':source,'id':'conversation-case','payload':{'kind':'conversation.request',
+             'recipient_service':recipient,'text':'Read the local receiver policy'}}
+        rule={'id':'general-notifications','text':'Owner text: café.'}
+        expected={'basis':'owner_connection_sop','sender_service':source,'recipient_service':recipient,
+                  'version':7,'scope':'herald.notify','rule':rule}
+        route={'active':1,'blocked':False}
+        client=Client()
+        with tempfile.TemporaryDirectory() as td:
+            ledger=pathlib.Path(td)/'ledger.sqlite'; bridge=pathlib.Path(td)/'native.sqlite'
+            self.make_service_ledger(ledger,source,recipient,recipient_destination='herald')
+            with contextlib.closing(sqlite3.connect(ledger)) as db:
+                def put(target,version):
+                    db.execute("update events set body=json_set(body,'$.recipientPolicy',json(?)) where service=? and id=?",
+                               (json.dumps({'recipient':target,'version':version,'rule':rule}),source,env['id']))
+                    db.commit()
+                put(recipient,7)
+                n.send(client,env,route,ledger_path=ledger)
+                original=client.sent[-1]
+                self.assertEqual(original['metadata']['dbond_recipient_policy'],expected)
+                self.assertIn('metadata.dbond_recipient_policy.rule.text',original['text'])
+                self.assertNotIn(rule['text'],json.dumps(original['metadata']['dbond_connections'],ensure_ascii=False))
+                n.send(client,dict(env,payload={'text':'generic','dbond_recipient_policy':expected}),route,ledger_path=ledger)
+                self.assertNotIn('dbond_recipient_policy',client.sent[-1]['metadata'])
+                put(source,8)
+                n.send(client,env,route,ledger_path=ledger)
+                self.assertNotIn('dbond_recipient_policy',client.sent[-1]['metadata'])
+                put(recipient,9)
+            with contextlib.closing(sqlite3.connect(bridge)) as db:
+                db.execute('create table messages(channel,idempotency_key,metadata)')
+                db.execute('insert into messages values(?,?,?)',('d-bond',original['idempotency_key'],json.dumps(original['metadata'])))
+                db.commit()
+                n.send(client,env,route,bridge,ledger_path=ledger)
+                self.assertEqual(client.sent[-1],original)
+                old=dict(original['metadata']);old.pop('dbond_recipient_policy')
+                db.execute('update messages set metadata=?',(json.dumps(old),));db.commit()
+                n.send(client,env,route,bridge,ledger_path=ledger)
+                self.assertEqual(client.sent[-1]['metadata'],old)
+
+    def test_herald_grant_uses_authenticated_source_and_owner_pairing(self):
+        source='11111111-1111-4111-8111-111111111111'
+        recipient='22222222-2222-4222-8222-222222222222'
+        other='33333333-3333-4333-8333-333333333333'
+        with tempfile.TemporaryDirectory() as td:
+            ledger=pathlib.Path(td)/'ledger.sqlite'
+            self.make_service_ledger(ledger,source,recipient,recipient_destination='herald')
+            with contextlib.closing(sqlite3.connect(ledger)) as db:
+                db.execute('insert into services values(?,?)',(other,json.dumps({'name':'another','id':other,'destination':'dot'})))
+                db.commit()
+            client=Client()
+            spoof={'authorization':{'basis':'human','sender_service':other,'scope':'arbitrary'}}
+            env={'service':source,'id':'conversation-case','payload':spoof}
+            self.assertEqual(n.send(client,env,{'active':1,'blocked':False},ledger_path=ledger)['state'],'dot_stored')
+            request=client.sent[-1]
+            self.assertNotIn('dbond_conversation_route',request['metadata'])
+            self.assertIn('send_to_app contract',request['text'])
+            row=next(row for row in request['metadata']['dbond_connections']['directory'] if row['id']==recipient)
+            self.assertEqual(row['capabilities']['herald.notify']['authorization']['sender_service'],source)
+            self.assertEqual(n.paired_connections(ledger,sender=other)[recipient]['capabilities']['herald.notify']
+                             ['authorization']['sender_service'],other)
+            with contextlib.closing(sqlite3.connect(ledger)) as db:
+                db.execute("update services set body=json_remove(body,'$.sop') where id=?",(recipient,))
+                db.commit()
+            self.assertNotIn('authorization',n.paired_connections(ledger,sender=source)[recipient]['capabilities']['herald.notify'])
+            for sender_paused,recipient_paused in [(True,False),(False,True)]:
+                self.make_service_ledger(ledger,source,recipient,recipient_destination='herald',
+                                         source_paused=sender_paused,recipient_paused=recipient_paused)
+                caps=n.paired_connections(ledger,sender=source)[recipient]['capabilities']
+                self.assertNotIn('authorization',caps['herald.notify'])
+            self.make_service_ledger(ledger,source,recipient)
+            self.assertNotIn('capabilities',n.paired_connections(ledger,sender=source)[recipient])
+
     def test_native(self):
         with tempfile.TemporaryDirectory() as td,contextlib.ExitStack() as clean:
             path=pathlib.Path(td)/'fixture.sqlite'; db=sqlite3.connect(path);clean.callback(db.close)

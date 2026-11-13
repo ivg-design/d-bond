@@ -26,7 +26,15 @@ Choose **Settings…** from the D-Bond menu or press **⌘,** while a D-Bond win
 
 ## Connect Herald
 
-In **Open Connections… → Add Connection…**, choose **Herald notification** and use **Herald / Notifications** for the name. If the connection is already listed, reuse it. Dot receives the active address and plain-text command in the directory on its next D-Bond request. An addressed alert goes through the existing D-Bond bridge to Herald on the Mac. The local receipt confirms Herald accepted the banner. Its History shows what happened to it. Interactive questions still use Herald’s reply-capable connector.
+In **Open Connections… → Add Connection…**, choose **Herald notification** and name it **Herald / Notifications**. When creating it, leave **Allow paired services to ask Dot to notify me** checked if you want this standing permission. If the connection already exists, reuse it and edit its **Rules → Plain notifications from paired services**. The internal rule ID is `general-notifications`. In Herald, open **Settings → General → D-Bond** to check the connection.
+
+From a paired Codex or Claude session, ask “Have Dot send me a test notification through Herald.” The equivalent CLI command is:
+
+```sh
+dbond ask YOUR_SESSION_ALIAS "Send me a short test notification" --to "Herald / Notifications"
+```
+
+D-Bond identifies the sender and the Herald destination to Dot. Dot writes the title and body; D-Bond forwards that reply to Herald on the Mac. You do not have to repeat the request in Dot chat. The session’s reply tells you what Dot wrote. **Herald → History** confirms the notification reached Herald. For interactive questions with buttons, use Herald’s reply-capable connector.
 
 ## Attach your SOP once
 

@@ -44,6 +44,28 @@ def main():
         with urllib.request.urlopen(urllib.request.Request(peers_url, headers={'Authorization':'Bearer '+secret}), timeout=3) as response:
             peers = json.load(response)['services']
         assert {'id':herald['id'],'name':'Herald / test','paused':False} in peers
+        # Only the selected recipient's named Herald rule is bound at admission.
+        rule={'id':'general-notifications','text':'Local owner allows ordinary paired alerts.'}
+        target_sop={'version':1,'rules':[rule,{'id':'private-other-rule','text':'unrelated receiver content'}]}
+        receiver=herald['id']
+        assert owner(directory,{'op':'set_sop','id':receiver,'expectedVersion':0,'sop':target_sop})['sop']==target_sop
+        sender=owner(directory,{'op':'pair','name':'Sender connection','destination':'dot'})
+        addressed={'kind':'conversation.request','recipient_service':receiver,'text':'One notification'}
+        addressed_event={'id':'addressed-herald','payload':addressed}
+        assert call(sender['endpoint'],sender['secret'],addressed_event)[0]==202
+        changed={'version':2,'rules':[dict(rule,text='changed after admission')]}
+        assert owner(directory,{'op':'set_sop','id':receiver,'expectedVersion':1,'sop':changed})['sop']==changed
+        assert call(sender['endpoint'],sender['secret'],addressed_event)[1]['duplicate']
+        spoof=dict(addressed,recipientPolicy={'version':99,'rule':rule})
+        assert call(sender['endpoint'],sender['secret'],{'id':'spoof','payload':spoof})[0]==202
+        assert call(sender['endpoint'],sender['secret'],{'id':'fresh','payload':addressed})[0]==202
+        with sqlite3.connect(directory/'ledger.sqlite') as db:
+            def snapshot(key):
+                raw=db.execute('select body from events where service=? and id=?',(sender['id'],key)).fetchone()[0]
+                return json.loads(raw).get('recipientPolicy')
+            assert snapshot('addressed-herald')=={'recipient':receiver,'version':1,'rule':rule}
+            assert snapshot('fresh')=={'recipient':receiver,'version':2,'rule':changed['rules'][0]}
+            assert snapshot('spoof') is None
         assert owner(directory,{'op':'list'})['services'][0]['sopVersion']==1
         assert owner(directory,{'op':'get_sop','id':service})['sop']==sop
         assert owner(directory,{'op':'get_sop','id':'unknown'}).get('error')

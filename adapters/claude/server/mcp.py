@@ -36,7 +36,7 @@ TOOLS = [
      {"alias": "Local pairing alias", "sequence": "Positive broker sequence of the received wake check"}, ["alias", "sequence"]),
     ("peers", "List paired D-Bond connections by display name and ID.", {"alias": "Local pairing alias"}, ["alias"]),
     ("ask", "Ask Dot or an addressed paired connection through Dot. Waits for a final reply or returns the latest receipt state on timeout.",
-     {"alias": "Local pairing alias", "text": "Question or message", "to": "Optional recipient display name or service UUID from peers", "timeout": "Seconds to wait, 1–300"}, ["alias", "text"]),
+     {"alias": "Local pairing alias", "text": "Question or message", "to": "Recipient name or UUID from peers. For a request to send the user a plain Herald notification, set to the active Herald / Notifications connection so Dot receives its owner rule.", "timeout": "Seconds to wait, 1–300"}, ["alias", "text"]),
     ("wait_for_push", "Wait for one addressed Dot push. This tool runs only when Claude calls it; it does not wake an idle Desktop chat.",
      {"alias": "Local pairing alias", "timeout": "Seconds to wait, 1–60"}, ["alias"]),
     ("answer", "Answer an authenticated Dot push using its recorded @dot sequence ID. Reports the actual Dot receipt state.",

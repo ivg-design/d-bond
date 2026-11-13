@@ -4,6 +4,13 @@ import Foundation
 import Darwin
 
 @MainActor
+private final class PairingDestinationAction: NSObject {
+    let action: () -> Void
+    init(_ action: @escaping () -> Void) { self.action = action }
+    @objc func invoke() { action() }
+}
+
+@MainActor
 final class MenuController: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private lazy var settings = SettingsWindowController()
@@ -123,12 +130,31 @@ final class MenuController: NSObject, NSApplicationDelegate {
         let chromeField = NSTextField(string: "")
         chromeField.placeholderString = "Chrome extension ID, if applicable (32 a–p characters)"
         chromeField.frame = NSRect(x:0,y:0,width:280,height:24)
-        let accessory = NSStackView(views: [field, topic, destination, chromeField])
+        let allowAlerts = NSButton(checkboxWithTitle: "Allow paired services to ask Dot to notify me", target: nil, action: nil)
+        allowAlerts.state = .on
+        allowAlerts.toolTip = "Save a shared rule for plain Herald notifications. You can edit it in Rules."
+        let alertsNote = NSTextField(wrappingLabelWithString: "Applies to plain alerts from connected services and sessions. You can change this in Rules.")
+        alertsNote.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        alertsNote.textColor = .secondaryLabelColor
+        let alertsOption = NSStackView(views: [allowAlerts, alertsNote])
+        alertsOption.orientation = .vertical
+        alertsOption.alignment = .leading
+        alertsOption.spacing = 3
+        alertsNote.preferredMaxLayoutWidth = 330
+        alertsNote.widthAnchor.constraint(equalToConstant: 330).isActive = true
+        let routeChanged = PairingDestinationAction {
+            alertsOption.isHidden = destination.indexOfSelectedItem != 1
+        }
+        routeChanged.action()
+        destination.target = routeChanged
+        destination.action = #selector(PairingDestinationAction.invoke)
+        let accessory = NSStackView(views: [field, topic, destination, chromeField, alertsOption])
         accessory.orientation = .vertical
         accessory.alignment = .leading
         accessory.spacing = 10
         alert.accessoryView = accessory
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let choice = withExtendedLifetime(routeChanged) { alert.runModal() }
+        guard choice == .alertFirstButtonReturn else { return }
         let service = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         let subject = topic.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !service.isEmpty, !subject.isEmpty, !service.contains(" / ") else {
@@ -144,9 +170,10 @@ final class MenuController: NSObject, NSApplicationDelegate {
             return
         }
         let chromeOrigin = chromeID.isEmpty ? nil : "chrome-extension://" + chromeID
+        let sop = OwnerSOP.pairedHeraldNotifications(destination: selected, enabled: allowAlerts.state == .on)
         DispatchQueue.global(qos: .userInitiated).async { [weak self, hub] in
             do {
-                let pairing = try hub.pair(name: name, destination: selected, chromeOrigin: chromeOrigin)
+                let pairing = try hub.pair(name: name, destination: selected, chromeOrigin: chromeOrigin, sop: sop)
                 DispatchQueue.main.async {
                     self?.showPairing(pairing, name: name, preset: selectedPreset)
                     self?.refreshMenu()

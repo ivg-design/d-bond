@@ -16,6 +16,11 @@ D-Bond resolves the recipient from its connection list and delivers Dot’s repl
 `dbond ask dbond-design "Which connections are paired?"` asks Dot itself.
 The addressed chat receives the push through its running listener.
 
+To ask Dot to notify you on this Mac, use `dbond ask <alias> --to "Herald / Notifications" "Notify me that the render finished"`.
+Codex and Claude can send the same natural-language request by passing the active Herald connection in their tool’s `to` field.
+The Mac attaches that receiver’s saved `general-notifications` rule to the addressed request.
+The macOS connection wizard lets you enable the rule when creating a Herald connection. CLI enrollment creates a pairing without adding a rule. You can edit it in D-Bond’s Rules window.
+
 ## Link a pairing
 
 From this directory:
