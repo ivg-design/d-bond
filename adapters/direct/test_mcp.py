@@ -37,6 +37,14 @@ class DirectMCPTests(unittest.TestCase):
                 mcp.invoke("local_status", {"alias":"x"})
         check.assert_called_once_with()
 
+    def test_acknowledge_wake_accepts_only_a_sequence(self):
+        tool = next(t for t in mcp.TOOLS if t["name"] == "acknowledge_wake")
+        self.assertEqual(tool["inputSchema"]["required"], ["alias", "sequence"])
+        self.assertEqual(tool["inputSchema"]["properties"]["sequence"]["type"], "integer")
+        with patch.object(mcp.wake_registration, "acknowledge", return_value={"sequence": 17}) as ack:
+            self.assertEqual(mcp.invoke("acknowledge_wake", {"alias": "test", "sequence": 17}), {"sequence": 17})
+            ack.assert_called_once_with("test", 17)
+
     def test_session_status_finish_is_explicit(self):
         with patch.object(mcp.dbond, "session_status", return_value={"alias":"test", "state":"pending_listener"}) as check:
             self.assertEqual(mcp.invoke("session_status", {"alias":"test"})["state"], "pending_listener")
@@ -62,13 +70,13 @@ class DirectMCPTests(unittest.TestCase):
                  patch.object(mcp.dbond, "_read_pairing", return_value=pair), \
                  patch.object(mcp.owner, "request", return_value={"services":[{"name":"Codex / First name","id":conn}]}), \
                  patch.object(mcp.dbond, "bind_session", return_value=pair) as bind, \
-                 patch.object(mcp.wake_registration, "begin", return_value={"state":"pending"}) as begin, \
+                 patch.object(mcp.dbond, "session_status", return_value={"wakeState":"offline"}) as status, \
                  patch.object(mcp.codex_registration, "attach", return_value={"state":"listening"}) as attach:
                 result = mcp.invoke("enroll_agent", {"name":"Codex / Renamed", "thread_id":thread})
                 self.assertTrue(result["reused"])
-                self.assertEqual(result["wake"]["state"], "pending")
+                self.assertEqual(result["wake"]["state"], "offline")
                 bind.assert_called_once_with(alias, "codex", thread)
-                begin.assert_called_once_with(pair)
+                status.assert_called_once_with(alias, finish_registration=False)
                 attach.assert_called_once_with(alias, thread, pair)
 
     def test_enrollment_reuses_unique_custom_alias_for_exact_chat(self):
@@ -87,7 +95,6 @@ class DirectMCPTests(unittest.TestCase):
                  patch.object(mcp.owner, "request", return_value={"services": [{"id": conn, "name": "Codex / Earlier title"}]}), \
                  patch.object(mcp.dbond, "command_enroll") as enroll, \
                  patch.object(mcp.dbond, "bind_session"), \
-                 patch.object(mcp.wake_registration, "begin", return_value={"state": "pending"}), \
                  patch.object(mcp.codex_registration, "attach", return_value={"state": "listening", "ready": True}), \
                  patch.object(mcp.dbond, "session_status", return_value={"registration_finish": {"scheduled": True}}) as finish:
                 result = mcp.invoke("enroll_agent", {"name": "Codex / New title", "thread_id": thread})
@@ -164,7 +171,6 @@ class DirectMCPTests(unittest.TestCase):
                  patch.object(mcp.owner, "request", return_value={"services": [{"id": "existing", "name": "Codex / Same"}]}), \
                  patch.object(mcp.dbond, "command_enroll", side_effect=enroll), \
                  patch.object(mcp.dbond, "bind_session"), \
-                 patch.object(mcp.wake_registration, "begin", return_value={"state": "pending"}), \
                  patch.object(mcp.codex_registration, "attach", return_value={"state": "degraded", "ready": False}):
                 result = mcp.invoke("enroll_agent", {"name": "Codex / Same", "thread_id": thread})
             self.assertEqual(result["linked"], f"codex-{thread}")

@@ -39,17 +39,22 @@ private final class HeraldHTTPResult: @unchecked Sendable {
     }
 }
 
+enum HeraldSender: String {
+    case service = "agent.dbond"
+    case dot = "cloud.chatgpt"
+}
+
 /// Send a safe, text-only Herald banner for an opted-in webhook service.
 /// This overload resolves Herald's owner-only `token` and `port` files from the default support directory.
-func sendHerald(service: String, id: String, payload: Data) throws -> String {
+func sendHerald(service: String, id: String, payload: Data, sender: HeraldSender = .service) throws -> String {
     let support = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Library/Application Support/Herald", isDirectory: true)
-    return try sendHerald(service: service, id: id, payload: payload, supportDirectory: support)
+    return try sendHerald(service: service, id: id, payload: payload, supportDirectory: support, sender: sender)
 }
 
 /// Fixture-friendly overload. `supportDirectory` may point to a temporary private fixture containing
 /// `token` and `port`; the HTTP destination remains literal IPv4 loopback in all cases.
-func sendHerald(service: String, id: String, payload: Data, supportDirectory: URL) throws -> String {
+func sendHerald(service: String, id: String, payload: Data, supportDirectory: URL, sender: HeraldSender = .service) throws -> String {
     guard service.utf8.count <= 128, id.utf8.count <= 120,
           !service.isEmpty, !id.isEmpty,
           service.unicodeScalars.allSatisfy({ CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_" )).contains($0) }),
@@ -76,7 +81,7 @@ func sendHerald(service: String, id: String, payload: Data, supportDirectory: UR
 
     let endpoint = URL(string: "http://127.0.0.1:\(port)/v1/notify")!
     let requestBody: [String: Any] = [
-        "app": "agent.dbond",
+        "app": sender.rawValue,
         "id": deterministicID,
         "title": title,
         "body": body

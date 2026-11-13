@@ -89,7 +89,8 @@ class ListenerTests(unittest.TestCase):
         self.assertIn("not a human message", prompt)
         wake = host_queue.pointer(THREAD, BOUND["alias"], "direct", 13,
                                   "@wake:" + THREAD)
-        self.assertIn("wake-ack", wake)
+        self.assertIn(f"wake-ack {BOUND['alias']} 13", wake)
+        self.assertNotIn("wake-ack", prompt)
         dot = host_queue.pointer(THREAD, BOUND["alias"], "dot", 14, "@dot:17")
         self.assertIn("dot-inbox", dot)
         self.assertIn("--after 13 --through 14", dot)
@@ -272,7 +273,7 @@ class ListenerTests(unittest.TestCase):
                 {"sequence": 1, "id": "old-a", "from": SENDER, "to": SERVICE, "text": "a"},
                 {"sequence": 2, "id": "old-b", "from": SENDER, "to": SERVICE, "text": "b"},
                 {"sequence": 3, "id": "@wake:" + THREAD, "from": "owner", "to": SERVICE,
-                 "text": "wake token"},
+                 "text": "wake check"},
             ]
             class FakeStream:
                 def __init__(self, _pair, after):

@@ -1,7 +1,6 @@
-"""Disposable broker wake challenge: authentication, generation, replay, and restart."""
+"""Disposable broker wake acknowledgments, enrollment, replay and restart."""
 import base64
 import json
-import re
 import socket
 import sqlite3
 import tempfile
@@ -20,9 +19,9 @@ def owner(directory, request):
         return json.loads(client.makefile("rb").readline())
 
 
-def ack(probe, pair, token, secret=None):
+def ack(probe, pair, sequence, secret=None):
     url = probe.endpoint + "/v1/services/" + pair["id"] + "/messages/wake-ack"
-    request = urllib.request.Request(url, json.dumps({"token":token}).encode(),
+    request = urllib.request.Request(url, json.dumps({"sequence":sequence}).encode(),
         {"Authorization":"Bearer " + (secret or pair["secret"]),"Content-Type":"application/json"})
     try:
         with urllib.request.urlopen(request, timeout=5) as response:
@@ -61,240 +60,184 @@ class Stream:
         self.sock.close()
 
 
+def stored_events(directory, pair):
+    with sqlite3.connect(directory / "ledger.sqlite") as db:
+        rows = db.execute("SELECT body FROM events WHERE service='owner' ORDER BY rowid").fetchall()
+    return [event for (raw,) in rows if (event := json.loads(raw)).get("route") == "peer:" + pair["id"]]
+
+
+def register(directory, pair):
+    return owner(directory, {"op":"finish_registration", "id":pair["id"]})
+
+
+def manual(directory, pair, retry=False):
+    return owner(directory, {"op":"begin_wake_test", "id":pair["id"], "retry":retry})
+
+
+def raw(probe, command):
+    probe.process.stdin.write(command + "\n")
+    probe.process.stdin.flush()
+    return json.loads(probe.process.stdout.readline())
+
+
 class WakeRoundtripTests(unittest.TestCase):
-    def test_explicit_retry_supersedes_old_token_and_filters_replay(self):
+    def test_ack_uses_delivery_sequence_and_pairing(self):
         with tempfile.TemporaryDirectory() as temp:
             directory = Path(temp)
             probe = Probe(directory)
             stream = replay = None
             try:
                 target = probe.command({"op":"pair","name":"Target","destination":"peer"})
-                first = owner(directory,{"op":"begin_wake_test","id":target["id"]})
+                wrong = probe.command({"op":"pair","name":"Wrong","destination":"peer"})
+                first = manual(directory, target)
+                self.assertEqual(manual(directory, target), first)
+                self.assertEqual(first["wakeState"], "offline")
                 stream = Stream(probe,target)
-                first_seq, first_event = stream.event()
-                first_token = re.search(r"wake-ack ALIAS ([0-9a-f]{64})",first_event["text"]).group(1)
-                second = owner(directory,{"op":"begin_wake_test","id":target["id"],"retry":True})
-                self.assertNotEqual(second["wakeID"],first["wakeID"])
-                self.assertEqual(second["wakeState"],"pending")
-                self.assertEqual(ack(probe,target,first_token)[0],422)
-                old = owner(directory,{"op":"trace","id":target["id"],"eventID":first["wakeID"]})["event"]
-                self.assertEqual(old["state"],"wake_superseded")
-                self.assertEqual(old["stages"][-1]["state"],"wake_superseded")
-                self.assertEqual(old["preview"],"Session wake check")
-                self.assertNotIn(first_token,json.dumps(old))
-                with sqlite3.connect(directory / "ledger.sqlite") as db:
-                    stored = json.loads(db.execute("SELECT body FROM events WHERE id=?",(first["wakeID"],)).fetchone()[0])
-                self.assertNotIn(first_token,base64.b64decode(stored["payload"]).decode())
+                seq, message = stream.event()
+                self.assertEqual(message["id"], first["wakeID"])
+                self.assertEqual(message["from"], "owner")
+                self.assertIn(f"wake-ack ALIAS {seq}.", message["text"])
+                self.assertNotIn("token", json.dumps(message))
+                stored = stored_events(directory,target)[0]
+                self.assertNotIn("wake_token",base64.b64decode(stored["payload"]).decode())
+                forged_url = probe.endpoint + "/v1/services/" + wrong["id"] + "/messages"
+                forged = urllib.request.Request(forged_url,
+                    json.dumps({"id":"@wake:forged","to":target["id"],"text":"forged check"}).encode(),
+                    {"Authorization":"Bearer " + wrong["secret"],"Content-Type":"application/json"})
+                with self.assertRaises(urllib.error.HTTPError) as rejected:
+                    urllib.request.urlopen(forged, timeout=5)
+                self.assertEqual(rejected.exception.code,422)
+                rejected.exception.close()
+                self.assertEqual(ack(probe,target,seq,wrong["secret"])[0],401)
+                self.assertEqual(ack(probe,wrong,seq)[0],422)
+                for bad in (True, "1", 0, -1, 1.25, seq + 1000):
+                    self.assertEqual(ack(probe,target,bad)[0],422)
+                raw(probe,"pause " + target["id"])
+                self.assertEqual(ack(probe,target,seq)[0],423)
+                raw(probe,"resume " + target["id"])
+                self.assertEqual(ack(probe,target,seq), (200, {"sequence":seq,"id":message["id"],"state":"verified","duplicate":False}))
+                self.assertTrue(ack(probe,target,seq)[1]["duplicate"])
+                trace = owner(directory,{"op":"trace","id":target["id"],"eventID":first["wakeID"]})["event"]
+                self.assertEqual([stage["state"] for stage in trace["stages"]], ["wake_pending","wake_verified"])
+                self.assertEqual(trace["stages"][-1]["basis"],"authenticated_connection_ack")
+                self.assertEqual(trace["preview"],"Session wake check")
+                # A fresh explicit test supersedes the previous receipt for ACK purposes.
+                second = manual(directory,target,True)
                 replay = Stream(probe,target,after=0)
-                replay_seq, replay_event = replay.event()
-                self.assertEqual(replay_event["id"],second["wakeID"])
-                self.assertGreater(replay_seq,first_seq)
-                request = urllib.request.Request(probe.endpoint + "/v1/services/" + target["id"] + "/messages?after=0",
-                    headers={"Authorization":"Bearer " + target["secret"]})
-                with urllib.request.urlopen(request,timeout=5) as response:
-                    self.assertEqual([row["id"] for row in json.load(response)["messages"]],[second["wakeID"]])
-                second_token = re.search(r"wake-ack ALIAS ([0-9a-f]{64})",replay_event["text"]).group(1)
-                self.assertEqual(ack(probe,target,second_token)[0],200)
-                rejected = owner(directory,{"op":"begin_wake_test","id":target["id"],"retry":True})
-                self.assertIn("error",rejected)
-                self.assertEqual(owner(directory,{"op":"begin_wake_test","id":target["id"]})["wakeID"],second["wakeID"])
+                seq2, message2 = replay.event()
+                self.assertEqual(message2["id"], second["wakeID"])
+                self.assertGreater(seq2,seq)
+                self.assertEqual(ack(probe,target,seq)[0],422)
+                self.assertEqual(ack(probe,target,seq2)[0],200)
             finally:
                 if replay: replay.close()
                 if stream: stream.close()
                 probe.close()
 
-    def test_restart_supersedes_unacknowledged_epoch_before_replay(self):
+    def test_retry_supersedes_pending_and_hides_it_from_replay(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            probe = Probe(directory)
+            stream = replay = None
+            try:
+                target = probe.command({"op":"pair","name":"Target","destination":"peer"})
+                first = manual(directory,target)
+                stream = Stream(probe,target)
+                seq, message = stream.event()
+                self.assertEqual(message["id"],first["wakeID"])
+                second = manual(directory,target,True)
+                self.assertNotEqual(first["wakeID"],second["wakeID"])
+                self.assertEqual(ack(probe,target,seq)[0],422)
+                replay = Stream(probe,target,after=0)
+                seq2,message2 = replay.event()
+                self.assertEqual(message2["id"],second["wakeID"])
+                self.assertEqual([e["state"] for e in stored_events(directory,target)], ["wake_superseded","wake_pending"])
+                url = probe.endpoint + "/v1/services/" + target["id"] + "/messages?after=0"
+                request = urllib.request.Request(url,headers={"Authorization":"Bearer " + target["secret"]})
+                with urllib.request.urlopen(request,timeout=5) as response:
+                    self.assertEqual([row["sequence"] for row in json.load(response)["messages"]], [seq2])
+            finally:
+                if replay: replay.close()
+                if stream: stream.close()
+                probe.close()
+
+    def test_restart_migrates_legacy_pending_check_then_remembers_ack(self):
         with tempfile.TemporaryDirectory() as temp:
             directory = Path(temp)
             probe = Probe(directory)
             stream = None
             try:
                 target = probe.command({"op":"pair","name":"Target","destination":"peer"})
-                first = owner(directory,{"op":"begin_wake_test","id":target["id"]})
-                stream = Stream(probe,target)
-                _, initial = stream.event()
-                old_token = re.search(r"wake-ack ALIAS ([0-9a-f]{64})",initial["text"]).group(1)
-                stream.close(); stream = None
+                other = probe.command({"op":"pair","name":"Other","destination":"peer"})
+                first = manual(directory,target)
+                stored = stored_events(directory,target)[0]
+                seq = stored["sequence"]
                 probe.close()
+                probe = None
+                with sqlite3.connect(directory/"ledger.sqlite") as db:
+                    old = "a" * 64
+                    payload = json.dumps({"text":"wake-ack ALIAS " + old,"wake_token":old})
+                    stored["payload"] = base64.b64encode(payload.encode()).decode()
+                    db.execute("UPDATE events SET body=? WHERE service='owner' AND id=?", (json.dumps(stored),first["wakeID"]))
+                    # A similarly named peer message is never a broker check.
+                    peer = {"service":other["id"],"id":"@wake:legacy-peer","state":"peer_delivered",
+                            "payload":base64.b64encode(b'{"text":"ordinary peer message"}').decode(),
+                            "route":"peer:" + target["id"]}
+                    db.execute("INSERT INTO events(service,id,body) VALUES(?,?,?)",(other["id"],peer["id"],json.dumps(peer)))
                 probe = Probe(directory)
-                stream = Stream(probe,target,after=0)
-                _, current = stream.event()
-                self.assertNotEqual(current["id"],first["wakeID"])
-                self.assertEqual(ack(probe,target,old_token)[0],422)
-                old = owner(directory,{"op":"trace","id":target["id"],"eventID":first["wakeID"]})["event"]
-                self.assertEqual(old["state"],"wake_superseded")
+                stream = Stream(probe,target)
+                n, msg = stream.event()
+                self.assertEqual((seq,first["wakeID"]),(n,msg["id"]))
+                self.assertNotIn(old,json.dumps(msg))
+                self.assertNotIn(old,base64.b64decode(stored_events(directory,target)[0]["payload"]).decode())
+                self.assertFalse(owner(directory,{"op":"trace","id":target["id"],"eventID":peer["id"]})["event"]["wakeCheck"])
+                self.assertFalse(register(directory,target)["scheduled"])
+                self.assertEqual(ack(probe,target,seq)[0],200)
+                stream.close();stream=None
+                probe.close();probe=Probe(directory)
+                status = owner(directory,{"op":"list"})["services"][0]
+                self.assertEqual(status["wakeState"],"offline")
+                self.assertIsNotNone(status["lastVerifiedAt"])
+                stream = Stream(probe,target,after=seq)
+                # HTTP headers can precede stream attachment.
+                for _ in range(50):
+                    result = register(directory,target)
+                    if result["wakeState"] == "verified": break
+                    time.sleep(.01)
+                self.assertEqual(result,{"id":target["id"],"wakeID":first["wakeID"],"wakeState":"verified","scheduled":False})
+                self.assertTrue(ack(probe,target,seq)[1]["duplicate"])
+                self.assertEqual(len(stored_events(directory,target)),1)
             finally:
                 if stream: stream.close()
-                probe.close()
+                if probe: probe.close()
 
-    def test_finish_registration_arms_one_delayed_retry(self):
+    def test_first_registration_delivers_once_after_setup_and_survives_restart(self):
         with tempfile.TemporaryDirectory() as temp:
             directory = Path(temp)
             probe = Probe(directory)
             stream = None
             try:
                 target = probe.command({"op":"pair","name":"Target","destination":"peer"})
-                first = owner(directory,{"op":"begin_wake_test","id":target["id"]})
-                offline = owner(directory,{"op":"finish_registration","id":target["id"]})
-                self.assertEqual(offline["wakeState"],"offline")
-                self.assertFalse(offline["scheduled"])
+                self.assertEqual(register(directory,target)["wakeState"],"offline")
                 stream = Stream(probe,target)
-                _, initial = stream.event()
-                self.assertEqual(initial["id"],first["wakeID"])
-                request = {"op":"finish_registration","id":target["id"]}
-                armed = owner(directory,request)
-                self.assertEqual(armed,{"id":target["id"],"wakeID":first["wakeID"],
-                                        "wakeState":"pending","scheduled":True})
-                self.assertEqual(owner(directory,request),armed)
+                for _ in range(50):
+                    first = register(directory,target)
+                    if first["scheduled"]: break
+                    time.sleep(.01)
+                self.assertTrue(first["scheduled"])
+                self.assertEqual(first, register(directory,target))
+                self.assertEqual(stored_events(directory,target)[0]["state"],"wake_scheduled")
+                stream.close();stream=None
+                probe.close();probe=Probe(directory)
+                stream = Stream(probe,target)
                 stream.sock.settimeout(13)
-                _, delayed = stream.event()
-                self.assertNotEqual(delayed["id"],first["wakeID"])
-                old_token = re.search(r"wake-ack ALIAS ([0-9a-f]{64})",initial["text"]).group(1)
-                self.assertEqual(ack(probe,target,old_token)[0],422)
-                self.assertEqual(owner(directory,request)["scheduled"],False)
-                with sqlite3.connect(directory / "ledger.sqlite") as db:
-                    self.assertEqual(db.execute("SELECT count(*) FROM events WHERE id LIKE '@wake:%'").fetchone()[0],2)
-                new_token = re.search(r"wake-ack ALIAS ([0-9a-f]{64})",delayed["text"]).group(1)
-                self.assertEqual(ack(probe,target,new_token)[0],200)
-                self.assertEqual(owner(directory,request)["wakeState"],"verified")
-            finally:
-                if stream: stream.close()
-                probe.close()
-
-    def test_delayed_retry_does_not_replace_changed_paused_or_revoked_challenge(self):
-        with tempfile.TemporaryDirectory() as temp:
-            directory = Path(temp)
-            probe = Probe(directory)
-            streams = []
-            try:
-                def raw(command):
-                    probe.process.stdin.write(command + "\n")
-                    probe.process.stdin.flush()
-                    return json.loads(probe.process.stdout.readline())
-                pairs = {}
-                for name in ("Changed","Paused","Revoked"):
-                    pair = probe.command({"op":"pair","name":name,"destination":"peer"})
-                    pairs[name] = pair
-                    owner(directory,{"op":"begin_wake_test","id":pair["id"]})
-                    stream = Stream(probe,pair)
-                    stream.event()
-                    streams.append(stream)
-                    self.assertTrue(owner(directory,{"op":"finish_registration","id":pair["id"]})["scheduled"])
-                changed = pairs["Changed"]
-                manual = owner(directory,{"op":"begin_wake_test","id":changed["id"],"retry":True})
-                self.assertEqual(manual["wakeState"],"pending")
-                paused = pairs["Paused"]
-                raw("pause " + paused["id"])
-                revoked = pairs["Revoked"]
-                raw("remove " + revoked["id"])
-                time.sleep(9.4)
-                with sqlite3.connect(directory / "ledger.sqlite") as db:
-                    rows = db.execute("SELECT body FROM events WHERE id LIKE '@wake:%'").fetchall()
-                by_target = {}
-                for (body,) in rows:
-                    event = json.loads(body)
-                    by_target.setdefault(event["route"],[]).append(event)
-                self.assertEqual(len(by_target["peer:" + changed["id"]]),2)
-                self.assertEqual(len(by_target["peer:" + paused["id"]]),1)
-                self.assertNotIn("peer:" + revoked["id"],by_target)
-                self.assertFalse(owner(directory,{"op":"finish_registration","id":changed["id"]})["scheduled"])
-            finally:
-                for stream in streams: stream.close()
-                probe.close()
-
-    def test_owner_challenge_requires_current_authenticated_recipient_ack(self):
-        with tempfile.TemporaryDirectory() as temp:
-            directory = Path(temp)
-            probe = Probe(directory)
-            target = probe.command({"op":"pair","name":"Target","destination":"peer"})
-            wrong = probe.command({"op":"pair","name":"Wrong","destination":"peer"})
-            stream = None
-            try:
-                def raw(command):
-                    probe.process.stdin.write(command + "\n")
-                    probe.process.stdin.flush()
-                    return json.loads(probe.process.stdout.readline())
-                first = owner(directory,{"op":"begin_wake_test","id":target["id"]})
-                repeat = owner(directory,{"op":"begin_wake_test","id":target["id"]})
-                self.assertEqual(first,repeat)
-                self.assertEqual(first["wakeState"],"offline")
-                self.assertEqual(owner(directory,{"op":"list"})["services"][0]["wakeState"],"offline")
-                stream = Stream(probe,target)
                 seq, event = stream.event()
                 self.assertEqual(event["id"],first["wakeID"])
-                self.assertEqual(event["from"],"owner")
-                forged_url = probe.endpoint + "/v1/services/" + wrong["id"] + "/messages"
-                forged = urllib.request.Request(forged_url,
-                    json.dumps({"id":"@wake:forged","to":target["id"],"text":"fake challenge"}).encode(),
-                    {"Authorization":"Bearer " + wrong["secret"],"Content-Type":"application/json"})
-                with self.assertRaises(urllib.error.HTTPError) as rejected:
-                    urllib.request.urlopen(forged,timeout=5)
-                self.assertEqual(rejected.exception.code,422)
-                rejected.exception.close()
-                token = re.search(r"wake-ack ALIAS ([0-9a-f]{64})",event["text"]).group(1)
-                self.assertEqual(owner(directory,{"op":"list"})["services"][0]["wakeState"],"pending")
-                self.assertEqual(ack(probe,target,token,wrong["secret"])[0],401)
-                self.assertEqual(ack(probe,target,"0"*64)[0],422)
-                self.assertEqual(ack(probe,target,token), (200,{"id":first["wakeID"],"state":"verified","duplicate":False}))
-                self.assertEqual(ack(probe,target,token)[1]["duplicate"],True)
-                status = owner(directory,{"op":"list"})["services"][0]
-                self.assertEqual(status["wakeState"],"verified")
-                self.assertEqual(status["subscribers"],0)
-                self.assertEqual(status["directSubscribers"],1)
-                self.assertIsNotNone(status["lastVerifiedAt"])
-                trace = owner(directory,{"op":"trace","id":target["id"],"eventID":first["wakeID"]})["event"]
-                self.assertEqual([row["state"] for row in trace["stages"]],["wake_pending","wake_verified"])
-                self.assertEqual(trace["stages"][-1]["basis"],"authenticated_connection_ack")
-                self.assertEqual(trace["preview"],"Session wake check")
-                self.assertNotIn(token,json.dumps(trace))
-                self.assertNotIn(token,json.dumps(owner(directory,{"op":"list_events","id":target["id"]})))
-                self.assertEqual(owner(directory,{"op":"begin_wake_test","id":target["id"]})["wakeID"],first["wakeID"])
-                # Pause closes the active stream. A later connection must get a fresh challenge.
-                raw("pause " + target["id"])
-                self.assertEqual(ack(probe,target,token)[0],423)
-                for _ in range(100):
-                    if owner(directory,{"op":"list"})["services"][0]["wakeState"] == "offline":
-                        break
-                    time.sleep(.01)
-                self.assertEqual(owner(directory,{"op":"list"})["services"][0]["wakeState"],"offline")
-                stream.close(); stream = None
-                raw("resume " + target["id"])
-                stream = Stream(probe,target,after=seq)
-                seq2, event2 = stream.event()
-                second = owner(directory,{"op":"begin_wake_test","id":target["id"]})
-                self.assertNotEqual(second["wakeID"],first["wakeID"])
-                self.assertEqual(second["wakeState"],"pending")
-                self.assertEqual(event2["id"],second["wakeID"])
-                token2 = re.search(r"wake-ack ALIAS ([0-9a-f]{64})",event2["text"]).group(1)
-                self.assertEqual(ack(probe,target,token)[0],422)
-                self.assertEqual(ack(probe,target,token2)[0],200)
-                # No ACK starts another challenge or self-ping.
-                self.assertEqual(owner(directory,{"op":"list"})["services"][0]["wakeState"],"verified")
-                with sqlite3.connect(directory / "ledger.sqlite") as db:
-                    self.assertEqual(db.execute("SELECT count(*) FROM events WHERE id LIKE '@wake:%'").fetchone()[0],2)
-                stream.close(); stream = None
-                probe.close()
-                with sqlite3.connect(directory / "ledger.sqlite") as db:
-                    legacy = {"service":wrong["id"],"id":"@wake:legacy-peer",
-                              "payload":base64.b64encode(b'{"text":"ordinary peer message"}').decode(),
-                              "state":"peer_delivered","route":"peer:" + target["id"]}
-                    db.execute("INSERT INTO events(service,id,body) VALUES(?,?,?)",
-                               (wrong["id"],legacy["id"],json.dumps(legacy)))
-                probe = Probe(directory)
-                historical = owner(directory,{"op":"list"})["services"][0]
-                self.assertEqual(historical["wakeState"],"offline")
-                self.assertIsNotNone(historical["lastVerifiedAt"])
-                legacy_trace = owner(directory,{"op":"trace","id":target["id"],"eventID":"@wake:legacy-peer"})["event"]
-                self.assertFalse(legacy_trace["wakeCheck"])
-                self.assertEqual(legacy_trace["direction"],"inbound")
-                stream = Stream(probe,target,after=seq2)
-                _, event3 = stream.event()
-                third = owner(directory,{"op":"begin_wake_test","id":target["id"]})
-                self.assertNotEqual(third["wakeID"],second["wakeID"])
-                self.assertEqual(third["wakeID"],event3["id"])
+                self.assertFalse(register(directory,target)["scheduled"])
+                self.assertFalse(ack(probe,target,seq)[1]["duplicate"])
+                self.assertEqual(len(stored_events(directory,target)),1)
             finally:
-                if stream:
-                    stream.close()
+                if stream: stream.close()
                 probe.close()
 
 

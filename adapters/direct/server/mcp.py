@@ -29,11 +29,12 @@ def tool(name, description, properties, required=()):
 STRING = {"type": "string"}
 TOOLS = [
     tool("local_status", "Check whether the D-Bond Mac app is installed and its owner service is reachable. Read-only; no pairing or credentials required.", {}),
-    tool("session_status", "Read owner-observed subscriptions by default. Set finish_registration=true only after the registration listener attaches to schedule one delayed proof, then END setup and handle the owner challenge in a later turn. Repeated finish is broker-idempotent. Subscriber presence alone is not proof of a host turn.",
+    tool("session_status", "Read owner-observed subscriptions by default. Set finish_registration=true only after the registration listener attaches to schedule one delayed proof, then END setup and handle the owner wake check in a later turn. Repeated finish is broker-idempotent. Subscriber presence alone is not proof of a host turn.",
          {"alias": STRING, "finish_registration": {"type": "boolean"}}, ("alias",)),
     tool("enroll_agent", "Register this session for two-way messages. For Codex pass this host chat’s exact thread_id and name. Reuse its pairing, attach its listener, and start the wake check in this turn. Report the broker's verified result before calling it ready. Keep any pending or unsupported host status visible.",
          {"alias": STRING, "name": STRING, "thread_id": STRING, "host": {"type":"string","enum":["codex","other"]}, "direct_only": {"type":"boolean"}}, ("name",)),
-    tool("acknowledge_wake", "Acknowledge the broker challenge delivered to this session in a new host turn. Use only the token from the received wake event.", {"alias":STRING,"token":STRING}, ("alias","token")),
+    tool("acknowledge_wake", "Acknowledge the wake check delivered to this session using its broker sequence.",
+         {"alias": STRING, "sequence": {"type": "integer", "minimum": 1}}, ("alias", "sequence")),
     tool("list_direct_peers", "List active or paused direct recipients by stable connection ID and display name.",
          {"alias": STRING}, ("alias",)),
     tool("send_direct_message", "Send directly to a paired recipient; broker receipt is not an answer. Reuse message_id on retry.",
@@ -92,7 +93,7 @@ def invoke(name, args):
     if name == "session_status":
         return dbond.session_status(args["alias"], finish_registration=args.get("finish_registration", False))
     if name == "acknowledge_wake":
-        return wake_registration.acknowledge(args["alias"], args["token"])
+        return wake_registration.acknowledge(args["alias"], args.get("sequence"))
     if name == "enroll_agent":
         thread = None if args.get("host") == "other" else codex_registration.thread_from_request(args)
         explicit_alias = args.get("alias")
@@ -133,11 +134,13 @@ def invoke(name, args):
             pairing = dbond._read_pairing(alias)
         if thread:
             dbond.bind_session(alias, "codex", thread)
-            result["wake"] = wake_registration.begin(pairing)
             result["listener"] = codex_registration.attach(alias,thread,pairing)
-            if result["listener"].get("ready") is True:
-                result["registration_finish"] = dbond.session_status(alias, finish_registration=True).get("registration_finish")
-            result["instructions"] = "End this setup turn after attachment. D-Bond will deliver the wake challenge in a recipient turn. Report pending until the broker verifies the acknowledgement."
+            ready = result["listener"].get("ready") is True
+            status = dbond.session_status(alias, finish_registration=ready)
+            result["wake"] = dbond.registration_wake_status(status)
+            if ready:
+                result["registration_finish"] = status.get("registration_finish")
+            result["instructions"] = "End setup after attachment. A verified pairing is ready. If a wake check is pending, acknowledge its sequence when it arrives in the receiving turn."
         return result
     if name in ("ask_dot", "answer_dot_push"):
         timeout = args.get("timeout", 120)

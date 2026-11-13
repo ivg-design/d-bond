@@ -19,7 +19,7 @@ enum AgentSessionKind {
 
 enum SessionWakeStatus {
     static func label(_ service: ServiceView) -> String {
-        guard !service.paused, service.directSubscribers > 0 else { return "Wake unverified" }
+        guard !service.paused, service.directSubscribers > 0 else { return service.lastVerifiedAt == nil ? "Wake unverified" : "Previously acknowledged" }
         switch service.wakeState {
         case "verified": return "Wake verified"
         case "pending": return "Testing wake"
@@ -29,7 +29,7 @@ enum SessionWakeStatus {
 
     static func detail(_ service: ServiceView) -> String {
         guard !service.paused, service.directSubscribers > 0 else {
-            return service.lastVerifiedAt == nil ? "Wake unverified" : "Wake unverified now · prior test is historical"
+            return service.lastVerifiedAt == nil ? "Waiting for listener" : "Pairing verified · listener offline"
         }
         switch service.wakeState {
         case "verified": return "Session acknowledged wake test"
@@ -116,7 +116,7 @@ enum SessionConnectionGuide {
         alert.messageText = "Connect session · " + service.name
         var body = "Direct listener: \(direct)\nDot stream: \(dot)\n\(wake): \(wakeDetail)\nConnection ID: \(service.id)\n\n"
         if wake != "Wake verified", let prior = service.lastVerifiedAt {
-            body += "Last acknowledged wake test: \(displayTraceTime(prior)) · historical only\n\n"
+            body += "Last acknowledged wake test: \(displayTraceTime(prior))\n\n"
         }
         body += "A listener is the transport, not proof that an idle chat resumed or answered. Use the host's normal connection flow first; these local commands are for repair or a host Monitor.\n\n"
         var copy: String?

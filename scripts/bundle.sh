@@ -32,6 +32,7 @@ mkdir -p "$AGENT_DIR/claude-code-marketplace/.claude-plugin" \
   "$AGENT_DIR/direct-stdio/adapters/direct/server" \
   "$AGENT_DIR/direct-stdio/adapters/cli"
 install -m 644 "$ROOT/dist/d-bond-claude.mcpb" "$AGENT_DIR/d-bond-claude.mcpb"
+/usr/bin/unzip -p "$AGENT_DIR/d-bond-claude.mcpb" manifest.json > "$AGENT_DIR/claude-desktop-manifest.json"
 cat > "$AGENT_DIR/claude-code-marketplace/.claude-plugin/marketplace.json" <<'JSON'
 {"name":"d-bond-local","owner":{"name":"IVG"},"plugins":[{"name":"d-bond","source":"./plugin"}]}
 JSON
@@ -82,8 +83,8 @@ cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
   <key>CFBundleIconFile</key><string>D-Bond.icns</string>
   <key>CFBundleName</key><string>D-Bond</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.3.2</string>
-  <key>CFBundleVersion</key><string>5</string>
+  <key>CFBundleShortVersionString</key><string>0.3.3</string>
+  <key>CFBundleVersion</key><string>6</string>
   <key>LSUIElement</key><true/>
   <key>NSHighResolutionCapable</key><true/>
 </dict>

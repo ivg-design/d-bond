@@ -28,7 +28,7 @@ remain separate from a broker storage receipt.
 Ordinary `session-status` is read-only. During registration, after the host
 Monitor attaches, explicitly call `session-status ALIAS --finish-registration`
 once and end setup. The broker schedules a delayed proof for a later recipient
-turn; repeating finish is idempotent for that challenge/generation.
+turn. Acknowledge the received check by its broker sequence. The pairing retains this receipt across reconnects.
 
 Call `local_status` without a pairing to check whether the existing Mac app is
 installed and its local owner service answers. It returns only installation

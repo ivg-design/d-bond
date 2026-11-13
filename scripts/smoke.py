@@ -38,7 +38,7 @@ def fake_herald(folder, cleanup):
         def do_POST(self):
             assert self.path=="/v1/notify" and self.headers.get("Authorization")=="Bearer "+key
             data=json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-            assert set(data)=={"app","title","body","id"} and data["app"]=="agent.dbond"
+            assert set(data)=={"app","title","body","id"}
             requests.append(data)
             output=json.dumps({"ok":True,"id":data["id"]}).encode()
             self.send_response(200); self.send_header("Content-Length",str(len(output))); self.end_headers(); self.wfile.write(output)
@@ -84,7 +84,7 @@ def run():
         outcome=call(h["endpoint"]+"/stream?after=0",h["secret"])[1]["messages"][0]
         assert outcome["state"]=="herald_accepted" and len(requests)==1
         expected="dbond-"+hashlib.sha256((h["id"]+":banner-1").encode()).hexdigest()[:32]
-        assert requests[0]["id"]==expected
+        assert requests[0]["id"]==expected and requests[0]["app"]=="agent.dbond"
         assert call(h["endpoint"],h["secret"],banner)[1]["duplicate"]
         assert call(h["endpoint"],h["secret"],{"id":"reject","payload":dict(banner["payload"],command="do not run")})[0]==202
         rejected=call(h["endpoint"]+"/stream?after="+str(outcome["sequence"]),h["secret"])[1]["messages"][0]
@@ -98,7 +98,7 @@ def run():
             time.sleep(.03)
         assert any(row["id"]=="@dot:101" and row["state"]=="herald_accepted" for row in push_rows)
         assert any(row["id"]=="herald-return-101" and row["reply"]=="fixture return @dot:101 stored" for row in push_rows)
-        assert len(requests)==2
+        assert len(requests)==2 and requests[1]["app"]=="cloud.chatgpt"
         tell(p,"inject-push "+h["id"]+" @dot:101 "+push)
         assert len(requests)==2
         bad=json.dumps({"kind":"herald.notify","title":"No","body":"No","command":"extra"},separators=(",",":"))
@@ -122,7 +122,7 @@ def run():
         tell(p,"resume "+h["id"])
         deadline=time.monotonic()+8
         while len(requests)<3 and time.monotonic()<deadline: time.sleep(.03)
-        assert len(requests)==3
+        assert len(requests)==3 and requests[2]["app"]=="cloud.chatgpt"
         h_url=base+"/v1/services/"+h["id"]+"/events"
         deadline=time.monotonic()+8
         while time.monotonic()<deadline:

@@ -474,31 +474,22 @@ def _enrollment_payload(args, pairing: dict, *, reused: bool) -> dict:
               "reused": reused, "pairing_state": "saved"}
     result["listener"] = _enrollment_listener(args, pairing)
     if client in ("claude", "codex") and isinstance(session_id, str) and SESSION_ID_RE.fullmatch(session_id):
-        result["wake"] = begin_wake_registration(pairing)
-        if client == "codex" and result["listener"].get("ready") is True:
-            result["registration_finish"] = session_status(args.alias, finish_registration=True).get("registration_finish")
+        ready = client == "codex" and result["listener"].get("ready") is True
+        status = session_status(args.alias, finish_registration=ready)
+        result["wake"] = registration_wake_status(status)
+        if ready:
+            result["registration_finish"] = status.get("registration_finish")
     return result
 
 
-def begin_wake_registration(pairing: dict) -> dict:
-    instruction = "An initial challenge may arrive during setup. After the listener attaches, explicitly finish registration, END setup, and acknowledge only the delayed owner challenge in the later recipient turn. Do not report wake verified until session-status says wakeState verified."
-    try:
-        from wake_registration import begin
-        value = begin(pairing)
-        state = value.get("state") if isinstance(value, dict) else None
-        result = {"state": state if state in ("pending", "verified", "offline") else "unknown",
-                  "instruction": instruction}
-        if isinstance(value, dict):
-            for key in ("lastVerifiedAt", "verification", "reason"):
-                if isinstance(value.get(key), str) and len(value[key]) <= 160:
-                    result[key] = value[key]
-            if isinstance(result.get("lastVerifiedAt"), str):
-                local = _local_trace_time(result["lastVerifiedAt"])
-                if local != result["lastVerifiedAt"]:
-                    result["lastVerifiedLocal"] = local
-        return result
-    except Exception:
-        return {"state": "unknown", "instruction": instruction}
+def registration_wake_status(status: dict) -> dict:
+    """Report broker state; registration schedules its single check after attachment."""
+    finish = status.get("registration_finish") or {}
+    result = {"state": finish.get("wakeState") or status.get("wakeState") or "unknown"}
+    for source, target in (("lastWakeVerifiedAt", "lastVerifiedAt"), ("lastWakeVerifiedLocal", "lastVerifiedLocal")):
+        if status.get(source):
+            result[target] = status[source]
+    return result
 
 
 def _enrollment_listener(args, pairing: dict) -> dict:
@@ -743,7 +734,7 @@ def session_listener_guidance(alias: str, *, direct_only: bool = False) -> dict:
     streams = ["direct"] if direct_only else ["direct", "dot"]
     return {"command": command, "mode": "foreground", "streams": streams,
             "verify_command": f"dbond session-status {alias} --finish-registration",
-            "instruction": f"In this registration turn, start the host's native Monitor on {command} for this exact paired session, then run dbond session-status {alias} --finish-registration after its direct and Dot streams attach. If registration_finish.scheduled is true, END this setup turn now. Handle the delayed owner challenge in the later recipient turn and verify wakeState then. Keep the Monitor running; saved cursors replay after absence. This command alone does not wake a closed chat."}
+            "instruction": f"In this registration turn, start the host's native Monitor on {command} for this exact paired session, then run dbond session-status {alias} --finish-registration after the requested streams attach, then END setup. A verified pairing is ready. If a wake check is pending, acknowledge its broker sequence when it arrives in the receiving turn. Keep the Monitor running; saved cursors replay after absence. This command alone does not wake a closed chat."}
 
 
 def valid_direct_source(source: str, sender: str) -> bool:
@@ -1084,6 +1075,12 @@ def command_answer(args) -> None:
         stream.close()
 
 
+def wake_sequence(value: str) -> int:
+    if not re.fullmatch(r"[0-9]{1,19}", value) or not 1 <= int(value) <= 2**63 - 1:
+        raise argparse.ArgumentTypeError("Use the broker sequence printed on the received wake check.")
+    return int(value)
+
+
 def parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="dbond", description="Send and receive events through a D-Bond service pairing.")
     sub = p.add_subparsers(dest="command", required=True)
@@ -1115,12 +1112,12 @@ def parser() -> argparse.ArgumentParser:
     peers = sub.add_parser("peers", help="list connections by their D-Bond names and IDs")
     peers.add_argument("alias", help="your own paired alias")
     peers.set_defaults(run=lambda args: print(json.dumps(_peers(_read_pairing(args.alias)), ensure_ascii=False)))
-    wake_ack = sub.add_parser("wake-ack", help="answer the wake challenge received by this session")
+    wake_ack = sub.add_parser("wake-ack", help="acknowledge this session’s received wake check by its broker sequence")
     wake_ack.add_argument("alias")
-    wake_ack.add_argument("token")
+    wake_ack.add_argument("sequence", type=wake_sequence, help="sequence printed on the received wake check")
     def acknowledge_wake(args):
         from wake_registration import acknowledge
-        print(json.dumps(acknowledge(args.alias, args.token)))
+        print(json.dumps(acknowledge(args.alias, args.sequence)))
     wake_ack.set_defaults(run=acknowledge_wake)
     history = sub.add_parser("dot-inbox", help="read retained addressed Dot pushes in a sequence range without moving the listener")
     history.add_argument("alias")

@@ -2,7 +2,7 @@
 
 Build the local Claude Desktop extension with `python3 adapters/claude/build.py`,
 then install `dist/d-bond-claude.mcpb` through Claude Desktop's local extension
-settings. Keep D-Bond running. Version 0.1.7 provides read-only `local_status`,
+settings. Keep D-Bond running. Version 0.1.8 provides read-only `local_status`,
 `enroll`, `session_status`, `acknowledge_wake`, `peers`, `ask`,
 `wait_for_push`, `answer`, `direct_peers`, `direct_send`, `wait_for_direct`, and
 `direct_answer`. The direct tools address any paired service without Dot.
@@ -15,11 +15,9 @@ pending. In the same turn, start the host's native Monitor on the returned
 `listener.command` (`dbond session-listen <exact alias>`), then call
 `session_status` with `finish_registration:true` after its streams attach and
 end setup immediately. The finish action schedules one delayed proof;
-ordinary status is read-only and repeat finish is broker-idempotent. An
-earlier setup challenge does not replace the delayed challenge in the later
-recipient turn. The combined listener receives direct agent messages and
-addressed Dot pushes. The delayed owner challenge requires
-`acknowledge_wake` in that later turn; only
+ordinary status is read-only and repeat finish is broker-idempotent. The combined listener receives direct agent messages and
+addressed Dot pushes. The delayed owner wake check requires
+`acknowledge_wake` with the received sequence in that later turn; only
 `wakeState:verified` confirms an authenticated connection ACK while its stream
 was active, not an independently verified model turn. The MCP server does not start a detached
 listener or claim a closed chat can wake itself.
@@ -37,7 +35,7 @@ alias is reused even when the chat title changed.
 API can report `offline`. The short, read-only check runs only on explicit
 tool call; MCP startup does not probe the app or expose paths and credentials.
 
-For Claude Code, build first and load `adapters/claude/plugin` version 0.1.9.
+For Claude Code, build first and load `adapters/claude/plugin` version 0.1.10.
 The plugin stays idle until it resolves this open Code session's exact UUID
 and its saved pairing binding. Use `enroll` inside each intended session; a
 verified same-user Claude ancestor supplies the UUID, or pass that exact UUID
@@ -54,7 +52,7 @@ policy depend on the installed Claude Code version. An installed plugin and a
 broker receipt alone do not prove a live agent wake. Claude Code uses its
 native channel for both streams and does not start a second Monitor. Once its
 streams attach, call `session_status` with `finish_registration:true`, end
-setup, and handle the delayed challenge later.
+setup, and handle the delayed wake check later.
 
 The adapters use D-Bond's local pairing store. Dot delivery additionally needs
 the separately installed and authenticated Dot Bridge Transport host described

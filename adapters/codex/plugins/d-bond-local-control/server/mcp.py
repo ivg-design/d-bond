@@ -10,7 +10,7 @@ from datetime import datetime
 import owner
 import direct
 
-VERSION = "0.1.5"
+VERSION = "0.1.6"
 UUID = re.compile(r"^[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$")
 
 

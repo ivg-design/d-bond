@@ -1,3 +1,4 @@
+import CoreFoundation
 import CryptoKit
 import Darwin
 import Foundation
@@ -60,10 +61,6 @@ public final class Hub: @unchecked Sendable {
     private var nativeWorker:Process?
     private var subscribers:[String:Int] = [:]
     private var directSubscribers:[String:Int] = [:]
-    private var directGeneration:[String:Int] = [:]
-    private var wakeGeneration:[String:Int] = [:]
-    private var wakeRetryArmed:[String:(generation:Int,id:String)] = [:]
-    private var wakeRetryUsed:[String:Int] = [:]
     public convenience init() throws {
         let base = FileManager.default.urls(for:.applicationSupportDirectory,in:.userDomainMask)[0]
         try self.init(directory:base.appendingPathComponent("D-Bond Proof of Concept"),port:18768)
@@ -90,6 +87,16 @@ public final class Hub: @unchecked Sendable {
         var recovery = ledger
         for i in ledger.events.indices {
             let event = ledger.events[i]
+            if event.service == "owner", event.id.hasPrefix("@wake:"), event.route?.hasPrefix("peer:") == true {
+                if let sequence = event.sequence {
+                    let cleaned = try Self.wakePayload(state: event.state, sequence: sequence)
+                    if cleaned != event.payload {
+                        recovery.events[i].payload = cleaned
+                        recovery.events[i].payloadDigest = Self.digest(cleaned)
+                    }
+                }
+                continue
+            }
             guard let service = ledger.services.first(where: { $0.id == event.service }) else { continue }
             let isDot = event.route == "dot_return" || service.destination == "dot"
             if isDot, !event.id.hasPrefix("@dot:"), !event.payload.isEmpty,
@@ -109,6 +116,9 @@ public final class Hub: @unchecked Sendable {
             }
         }
         if recovery.events != ledger.events { try persist(recovery) }
+        for event in ledger.events where event.service == "owner" && event.state == "wake_scheduled" {
+            scheduleWake(event)
+        }
         server.start { [weak self] req in self?.route(req) ?? HTTPReply(503,[:]) }
         for event in ledger.events where event.state == "queued" && ledger.services.contains(where: { $0.id == event.service && $0.paused != true }) {
             if event.id.hasPrefix("@dot:") { publishDotPush(service:event.service,id:event.id) }
@@ -201,10 +211,10 @@ public final class Hub: @unchecked Sendable {
     public func dotLinkStatus() -> String { nativeStatus() }
     private func wakeRow(for service:String) -> Int? {
         ledger.events.lastIndex { $0.service == "owner" && $0.route == "peer:" + service && $0.id.hasPrefix("@wake:") &&
-            ["wake_pending","wake_verified"].contains($0.state) }
+            ["wake_scheduled","wake_pending","wake_verified"].contains($0.state) }
     }
-    private static func supersededWake(_ event:Event) -> Bool {
-        event.service == "owner" && event.id.hasPrefix("@wake:") && event.state == "wake_superseded"
+    private static func inactiveWake(_ event:Event) -> Bool {
+        event.service == "owner" && event.id.hasPrefix("@wake:") && event.state != "wake_pending"
     }
     private func lastVerifiedAt(for service:String) -> String? {
         ledger.events.reversed().first { $0.service == "owner" && $0.route == "peer:" + service &&
@@ -213,103 +223,123 @@ public final class Hub: @unchecked Sendable {
     private func wakeState(for service:String) -> String {
         guard ledger.services.contains(where:{$0.id==service && $0.paused != true}) else { return "offline" }
         guard (directSubscribers[service] ?? 0) > 0 else { return "offline" }
-        guard wakeGeneration[service] == directGeneration[service], let index=wakeRow(for:service) else { return "pending" }
+        guard let index=wakeRow(for:service) else { return "pending" }
         return ledger.events[index].state == "wake_verified" ? "verified" : "pending"
     }
-    /// Explicit owner request. A repeated request in the same listener generation
-    /// reuses its challenge unless retry is requested after a listener is active.
+    private static func wakePayload(state: String, sequence: Int) throws -> Data {
+        let text: String
+        switch state {
+        case "wake_pending":
+            text = "D-Bond wake check. After reading this message in the paired session, acknowledge its message number with ~/.local/bin/dbond wake-ack ALIAS \(sequence). Replace ALIAS with this session's paired alias."
+        case "wake_verified":
+            text = "D-Bond wake check acknowledged."
+        default:
+            text = "D-Bond wake check superseded."
+        }
+        return try JSONSerialization.data(withJSONObject: ["text": text, "in_reply_to": NSNull()], options: [.sortedKeys])
+    }
+
+    /// Registration reuses its persisted check. Only an explicit retry replaces it.
     public func beginWakeTest(service:String,retry:Bool = false) throws -> (id:String,state:String) {
         lock.lock(); defer { lock.unlock() }
-        return try beginWakeTestLocked(service:service,retry:retry)
-    }
-    private func beginWakeTestLocked(service:String,retry:Bool) throws -> (id:String,state:String) {
         guard ledger.services.contains(where:{$0.id==service && ["dot","peer"].contains($0.destination ?? "") && $0.paused != true}) else {
             throw Fault.message("Wake test requires an active paired direct connection.")
         }
-        let generation=(directSubscribers[service] ?? 0) > 0 ? (directGeneration[service] ?? 0) : 0
-        if wakeGeneration[service] == generation, let index=wakeRow(for:service) {
-            if !retry { return (ledger.events[index].id,wakeState(for:service)) }
-            guard generation > 0 && ledger.events[index].state == "wake_pending" else {
-                throw Fault.message("Only a pending wake test on the current live listener can be retried.")
-            }
-        } else if retry {
-            throw Fault.message("No pending wake test on the current live listener to retry.")
+        if let index = wakeRow(for: service), !retry {
+            return (ledger.events[index].id, wakeState(for: service))
         }
-        let token=(UUID().uuidString + UUID().uuidString).replacingOccurrences(of:"-",with:"").lowercased()
-        let id="@wake:" + UUID().uuidString.lowercased()
-        let text="D-Bond wake check for this exact paired session. Only after this message arrives in a newly invoked host turn through your listener, run ~/.local/bin/dbond wake-ack ALIAS \(token) once. Replace ALIAS with this session's paired alias. The ACK proves an authenticated app-level roundtrip, not guaranteed idle-chat wake."
-        let payload=try JSONSerialization.data(withJSONObject:["text":text,"wake_token":token,"in_reply_to":NSNull()],options:[.sortedKeys])
-        var next=ledger
-        let superseded=try JSONSerialization.data(withJSONObject:["text":"D-Bond wake check superseded; its token is invalid.","in_reply_to":NSNull()],options:[.sortedKeys])
+        let event = try createWake(service: service, delayed: false)
+        return (event.id, wakeState(for: service))
+    }
+
+    private func createWake(service: String, delayed: Bool) throws -> Event {
+        var next = ledger
         for index in next.events.indices where next.events[index].service == "owner" &&
             next.events[index].route == "peer:" + service && next.events[index].id.hasPrefix("@wake:") &&
-            next.events[index].state == "wake_pending" {
-            next.events[index]=Self.marked(next.events[index],"wake_superseded")
-            next.events[index].payload=superseded
-            next.events[index].payloadDigest=Self.digest(superseded)
+            ["wake_scheduled", "wake_pending"].contains(next.events[index].state) {
+            next.events[index] = Self.marked(next.events[index], "wake_superseded")
+            let payload = try Self.wakePayload(state: "wake_superseded", sequence: next.events[index].sequence ?? 0)
+            next.events[index].payload = payload
+            next.events[index].payloadDigest = Self.digest(payload)
         }
-        next.seq += 1
-        var event=Event(service:"owner",id:id,payload:payload,state:"wake_pending",sequence:next.seq,
-                        payloadDigest:Self.digest(payload),route:"peer:" + service)
-        event=Self.marked(event,"wake_pending")
+        let state = delayed ? "wake_scheduled" : "wake_pending"
+        let id = "@wake:" + UUID().uuidString.lowercased()
+        var event = Event(service: "owner", id: id, payload: Data(), state: state, route: "peer:" + service)
+        if !delayed { try Self.assignWakeSequence(to: &event, in: &next) }
+        event = Self.marked(event, state)
         next.events.append(event)
         try persist(next)
-        wakeGeneration[service]=generation
+        if delayed { scheduleWake(event) }
         lock.broadcast()
-        return (id,wakeState(for:service))
+        return event
     }
-    /// One bounded post-setup retry. Registration calls this after its listener
-    /// attaches and just before the setup turn yields, so the challenge is new.
+
+    private static func assignWakeSequence(to event: inout Event, in next: inout Ledger) throws {
+        next.seq += 1
+        event.sequence = next.seq
+        event.payload = try wakePayload(state: "wake_pending", sequence: next.seq)
+        event.payloadDigest = digest(event.payload)
+    }
+
+    /// Give the setup turn time to yield. Only the first registration creates a
+    /// check, and its durable scheduled row survives a restart before delivery.
     public func finishRegistration(service:String) throws -> (id:String?,state:String,scheduled:Bool) {
         lock.lock(); defer { lock.unlock() }
-        guard ledger.services.contains(where:{$0.id==service}) else { throw Fault.message("Connection no longer exists.") }
-        let state=wakeState(for:service)
-        let current=wakeRow(for:service).map { ledger.events[$0].id }
-        guard state == "pending", let id=current,
-              let index=wakeRow(for:service),ledger.events[index].state == "wake_pending",
-              let generation=directGeneration[service],wakeGeneration[service] == generation,
-              (directSubscribers[service] ?? 0) > 0 else {
-            return (current,state,false)
+        guard ledger.services.contains(where:{$0.id==service && ["peer","dot"].contains($0.destination ?? "")}) else {
+            throw Fault.message("Direct connection no longer exists.")
         }
-        if let armed=wakeRetryArmed[service],armed.generation == generation && armed.id == id {
-            return (id,state,true)
+        let state = wakeState(for: service)
+        if let index = wakeRow(for: service) {
+            let event = ledger.events[index]
+            return (event.id, state, event.state == "wake_scheduled")
         }
-        guard wakeRetryUsed[service] != generation else { return (id,state,false) }
-        wakeRetryUsed[service]=generation
-        wakeRetryArmed[service]=(generation,id)
-        DispatchQueue.global(qos:.utility).asyncAfter(deadline:.now()+9) { [weak self] in
-            self?.fireRegistrationRetry(service:service,generation:generation,id:id)
-        }
-        return (id,state,true)
+        guard state != "offline" else { return (nil, state, false) }
+        let event = try createWake(service: service, delayed: true)
+        return (event.id, state, true)
     }
-    private func fireRegistrationRetry(service:String,generation:Int,id:String) {
+
+    private func scheduleWake(_ event: Event) {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let scheduledAt = event.stages?.first.flatMap { formatter.date(from: $0.at) } ?? Date()
+        let delay = max(0, scheduledAt.addingTimeInterval(9).timeIntervalSinceNow)
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + delay) { [weak self] in self?.deliverScheduledWake(id: event.id) }
+    }
+
+    private func deliverScheduledWake(id: String) {
         lock.lock(); defer { lock.unlock() }
-        guard let armed=wakeRetryArmed[service],armed.generation == generation && armed.id == id else { return }
-        wakeRetryArmed.removeValue(forKey:service)
-        guard directGeneration[service] == generation,wakeGeneration[service] == generation,
-              (directSubscribers[service] ?? 0) > 0,
-              let index=wakeRow(for:service),ledger.events[index].id == id,
-              ledger.events[index].state == "wake_pending",
-              ledger.services.contains(where:{$0.id==service && $0.paused != true}) else { return }
-        _ = try? beginWakeTestLocked(service:service,retry:true)
+        guard let index = ledger.events.firstIndex(where: { $0.service == "owner" && $0.id == id && $0.state == "wake_scheduled" }) else { return }
+        var next = ledger
+        var event = next.events[index]
+        do {
+            try Self.assignWakeSequence(to: &event, in: &next)
+            next.events[index] = Self.marked(event, "wake_pending")
+            try persist(next)
+            lock.broadcast()
+        } catch {
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2) { [weak self] in self?.deliverScheduledWake(id: id) }
+        }
     }
-    private func acknowledgeWake(service:String,token:String) -> HTTPReply {
-        guard (directSubscribers[service] ?? 0) > 0,
-              wakeGeneration[service] == directGeneration[service],
-              let index=wakeRow(for:service),
-              let body=(try? JSONSerialization.jsonObject(with:ledger.events[index].payload)) as? [String:Any],
-              body["wake_token"] as? String == token else {
-            return HTTPReply(422,["error":"No matching live wake challenge."])
+
+    private func acknowledgeWake(service:String, sequence:Int) -> HTTPReply {
+        guard let index = wakeRow(for: service), ledger.events[index].sequence == sequence,
+              ["wake_pending", "wake_verified"].contains(ledger.events[index].state) else {
+            return HTTPReply(422, ["error":"This message is not the current wake check for this pairing."])
         }
-        if ledger.events[index].state == "wake_verified" {
-            return HTTPReply(200,["id":ledger.events[index].id,"state":"verified","duplicate":true])
+        let event = ledger.events[index]
+        let duplicate = event.state == "wake_verified"
+        if !duplicate {
+            do {
+                var next = ledger
+                next.events[index] = Self.marked(event, "wake_verified", basis: "authenticated_connection_ack")
+                let payload = try Self.wakePayload(state: "wake_verified", sequence: sequence)
+                next.events[index].payload = payload
+                next.events[index].payloadDigest = Self.digest(payload)
+                try persist(next)
+                lock.broadcast()
+            } catch { return HTTPReply(507, ["error":"Could not persist wake acknowledgement."]) }
         }
-        guard ledger.events[index].state == "wake_pending" else { return HTTPReply(422,["error":"Wake challenge is no longer pending."]) }
-        var next=ledger
-        next.events[index]=Self.marked(next.events[index],"wake_verified",basis:"authenticated_connection_ack")
-        do { try persist(next); lock.broadcast() }
-        catch { return HTTPReply(507,["error":"Could not persist wake acknowledgement."]) }
-        return HTTPReply(200,["id":next.events[index].id,"state":"verified","duplicate":false])
+        return HTTPReply(200, ["id":event.id, "sequence":sequence, "state":"verified", "duplicate":duplicate])
     }
     /// Explicit owner-local note to one already paired, actively listening agent.
     /// This creates no pairing and offers no impersonation of another service.
@@ -412,13 +442,14 @@ public final class Hub: @unchecked Sendable {
         let dotReplyPreview = finalReply.flatMap { EventMessagePreview.make(Data($0.reply.utf8),eventID:event.id,service:event.service) }
         let dotReplyAt = finalReply.flatMap { $0.recordedAt } ?? (event.stages ?? []).last(where: { $0.state == "dot_replied" })?.at
         let isWake=event.service == "owner" && event.id.hasPrefix("@wake:") &&
-            ["wake_pending","wake_verified","wake_superseded"].contains(event.state) && event.route?.hasPrefix("peer:") == true
+            ["wake_scheduled","wake_pending","wake_verified","wake_superseded"].contains(event.state) && event.route?.hasPrefix("peer:") == true
         return EventTrace(service:event.service,eventID:event.id,state:event.state,
                           sopVersion:event.sop?.version,stages:event.stages ?? [],
                           direction:direction,counterpartID:counterpartID,counterpartName:name,
                           deliveryMeaning:isWake
                             ? (event.state == "wake_verified" ? "Authenticated connection acknowledged wake check; AI turn not independently proven" :
-                               event.state == "wake_superseded" ? "Wake check superseded; token invalid and not delivered on replay" : "Wake check stored for recipient; acknowledgement pending")
+                               event.state == "wake_scheduled" ? "Registration check scheduled" :
+                               event.state == "wake_superseded" ? "A later wake check replaced this one" : "Wake check stored for recipient; acknowledgement pending")
                             : direction == "local" ? nil : "Stored by D-Bond for recipient; agent read unconfirmed.",
                           inReplyTo:replyTo,brokerSequence:direction == "local" ? nil : event.sequence,preview:preview,wakeCheck:isWake,
                           dotReplyPreview:dotReplyPreview,dotReplyAt:finalReply == nil ? nil : dotReplyAt)
@@ -511,7 +542,7 @@ public final class Hub: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         guard ledger.services.contains(where: { $0.id == id }) else { throw Fault.message("Service connection no longer exists.") }
         var next = ledger; next.services.removeAll { $0.id == id }; next.events.removeAll { $0.service == id || $0.route == "peer:" + id }; next.receipts?.removeAll { $0.service == id }
-        try persist(next); directGeneration.removeValue(forKey:id); wakeGeneration.removeValue(forKey:id); lock.broadcast()
+        try persist(next); lock.broadcast()
     }
     /// An explicit retry keeps the original immutable service/event key and payload.
     /// The native helper must deduplicate that key; no new caller event is created.
@@ -612,9 +643,11 @@ public final class Hub: @unchecked Sendable {
             guard r.method == "POST", url.query == nil,
                   r.headers["content-type"]?.components(separatedBy:";").first?.lowercased() == "application/json",
                   let body=(try? JSONSerialization.jsonObject(with:r.body)) as? [String:Any],
-                  Set(body.keys) == ["token"],let token=body["token"] as? String,
-                  token.utf8.count == 64 else { return HTTPReply(422,["error":"Expected {token}."]) }
-            return acknowledgeWake(service:sender.id,token:token)
+                  Set(body.keys) == ["sequence"], let number = body["sequence"] as? NSNumber,
+                  CFGetTypeID(number) != CFBooleanGetTypeID(), let sequence = number as? Int, sequence > 0 else {
+                return HTTPReply(422, ["error":"Expected a positive wake message sequence."])
+            }
+            return acknowledgeWake(service:sender.id, sequence:sequence)
         }
         if parts.count == 5 && parts[4] == "peers" {
             guard r.method == "GET", url.query == nil else { return HTTPReply(405,[:]) }
@@ -637,7 +670,7 @@ public final class Hub: @unchecked Sendable {
                 return HTTPReply(200, stream: { [weak self] write in self?.directStream(service:sender.id,after:after,write:write) })
             }
             func rows() -> [[String:Any]] {
-                ledger.events.filter { $0.route == "peer:" + sender.id && ($0.sequence ?? 0) > after && !Self.supersededWake($0) }
+                ledger.events.filter { $0.route == "peer:" + sender.id && ($0.sequence ?? 0) > after && !Self.inactiveWake($0) }
                     .sorted { ($0.sequence ?? 0) < ($1.sequence ?? 0) }.prefix(64).compactMap { event in
                         guard let body = try? JSONSerialization.jsonObject(with:event.payload) as? [String:Any] else { return nil }
                         return ["id":event.id,"from":event.service,"to":sender.id,"text":body["text"] ?? "",
@@ -689,28 +722,18 @@ public final class Hub: @unchecked Sendable {
     }
     private func directStream(service:String, after:Int, write:(Data)->Bool) {
         lock.lock()
-        var renewWake = false
-        if (directSubscribers[service] ?? 0) == 0 {
-            directGeneration[service,default:0] += 1
-            if wakeGeneration[service] == 0 { wakeGeneration[service] = directGeneration[service] }
-            else if wakeRow(for:service) != nil && wakeGeneration[service] != directGeneration[service] { renewWake = true }
-        }
         directSubscribers[service,default:0] += 1
         lock.unlock()
-        if renewWake { _ = try? beginWakeTest(service:service) }
         defer {
             lock.lock(); directSubscribers[service,default:1] -= 1
-            if directSubscribers[service] == 0 {
-                directSubscribers.removeValue(forKey:service)
-                wakeGeneration.removeValue(forKey:service)
-            }
+            if directSubscribers[service] == 0 { directSubscribers.removeValue(forKey:service) }
             lock.unlock()
         }
         var cursor = after
         while true {
             lock.lock()
             guard ledger.services.contains(where: { $0.id == service && $0.paused != true && ["dot","peer"].contains($0.destination ?? "") }) else { lock.unlock(); return }
-            let rows = Array(ledger.events.filter { $0.route == "peer:" + service && ($0.sequence ?? 0) > cursor && !Self.supersededWake($0) }
+            let rows = Array(ledger.events.filter { $0.route == "peer:" + service && ($0.sequence ?? 0) > cursor && !Self.inactiveWake($0) }
                 .sorted { ($0.sequence ?? 0) < ($1.sequence ?? 0) }.prefix(64))
             if rows.isEmpty {
                 let changed = lock.wait(until:Date().addingTimeInterval(18))
@@ -722,10 +745,10 @@ public final class Hub: @unchecked Sendable {
             for row in rows {
                 lock.lock()
                 let active = ledger.services.contains(where: { $0.id == service && $0.paused != true })
-                let superseded = ledger.events.contains { $0.service == row.service && $0.id == row.id &&
-                    $0.route == row.route && Self.supersededWake($0) }
+                let inactive = ledger.events.contains { $0.service == row.service && $0.id == row.id &&
+                    $0.route == row.route && Self.inactiveWake($0) }
                 lock.unlock()
-                if superseded { cursor=row.sequence ?? cursor; continue }
+                if inactive { cursor=row.sequence ?? cursor; continue }
                 guard active, let body = try? JSONSerialization.jsonObject(with:row.payload) as? [String:Any] else { return }
                 let value:[String:Any] = ["id":row.id,"from":row.service,"to":service,"text":body["text"] ?? "",
                                           "in_reply_to":body["in_reply_to"] ?? NSNull(),"sequence":row.sequence ?? 0]
@@ -909,8 +932,8 @@ public final class Hub: @unchecked Sendable {
         let state:String, reply:String
         do {
             let payload = heraldPayload(event.payload)!
-            if let path = heraldSupport { reply = try sendHerald(service:service,id:id,payload:payload,supportDirectory:path) }
-            else { reply = try sendHerald(service:service,id:id,payload:payload) }
+            if let path = heraldSupport { reply = try sendHerald(service:service,id:id,payload:payload,supportDirectory:path,sender:.dot) }
+            else { reply = try sendHerald(service:service,id:id,payload:payload,sender:.dot) }
             state = "herald_accepted"
         } catch {
             state = "herald_unconfirmed"

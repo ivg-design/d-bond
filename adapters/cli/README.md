@@ -100,9 +100,8 @@ direct/Dot subscriber counts and separate `wakeState`. Ordinary status is
 read-only. In the registration turn, call `--finish-registration` **after**
 the listener attaches, then end setup immediately. It schedules one delayed
 owner proof for a later turn; repeated finish requests are broker-idempotent.
-An initial setup challenge may arrive earlier and does not replace that
-later proof. The recipient acknowledges the delayed challenge in its later
-turn. Subscriber presence and an authenticated ACK are separate from evidence
+The recipient runs `dbond wake-ack <alias> <sequence>` with the sequence
+of the received check. An established pairing retains its verification after reconnecting. Subscriber presence and an authenticated ACK are separate from evidence
 that a host model took a turn. The listener itself does
 not run in the background or wake an idle host without a real Monitor/channel.
 

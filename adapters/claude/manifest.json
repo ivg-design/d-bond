@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "d-bond",
   "display_name": "D-Bond",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "Use one local D-Bond pairing for Dot messages and direct messages with other paired services.",
   "author": {"name": "IVG"},
   "server": {

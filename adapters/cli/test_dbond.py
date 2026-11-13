@@ -263,12 +263,12 @@ class DBondCLITest(unittest.TestCase):
         fake_module = types.SimpleNamespace(attach=lambda a, sid, pair: attached.append((a, sid)) or {"state": "attached"})
         with patch.dict(sys.modules, {"codex_registration": fake_module}), \
              patch.object(dbond, "_peers", return_value=[{"id":"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "name":"Codex / Review"}]), \
-             patch.object(dbond, "begin_wake_registration", return_value={"state":"pending"}), \
+             patch.object(dbond, "session_status", return_value={"wakeState":"offline"}), \
              contextlib.redirect_stdout(io.StringIO()) as out:
             dbond.command_enroll(args)
         result = json.loads(out.getvalue())
         self.assertTrue(result["reused"])
-        self.assertEqual(result["wake"]["state"], "pending")
+        self.assertEqual(result["wake"]["state"], "offline")
         self.assertEqual(result["listener"]["state"], "attached")
         self.assertEqual(attached, [(alias, session_id)])
         self.assertEqual(dbond._read_pairing(alias)["session_id"], session_id)
@@ -282,7 +282,6 @@ class DBondCLITest(unittest.TestCase):
         args = type("Args", (), {"alias": alias, "client": "codex", "session_id": session_id,
                                   "title": "Review", "name": None, "direct": False})()
         with patch.object(dbond, "_peers", return_value=[{"id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "name": "Codex / Review"}]), \
-             patch.object(dbond, "begin_wake_registration", return_value={"state": "pending"}), \
              patch.object(dbond, "_enrollment_listener", return_value={"state": "listening", "ready": True}), \
              patch.object(dbond, "session_status", return_value={"registration_finish": {"scheduled": True}}) as finish, \
              contextlib.redirect_stdout(io.StringIO()) as out:
@@ -290,26 +289,34 @@ class DBondCLITest(unittest.TestCase):
         self.assertTrue(json.loads(out.getvalue())["registration_finish"]["scheduled"])
         finish.assert_called_once_with(alias, finish_registration=True)
         with patch.object(dbond, "_peers", return_value=[{"id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "name": "Codex / Review"}]), \
-             patch.object(dbond, "begin_wake_registration", return_value={"state": "pending"}), \
              patch.object(dbond, "_enrollment_listener", return_value={"state": "degraded", "ready": False}), \
-             patch.object(dbond, "session_status") as no_finish, \
+             patch.object(dbond, "session_status", return_value={"wakeState": "offline"}) as no_finish, \
              contextlib.redirect_stdout(io.StringIO()) as out:
             dbond.command_enroll(args)
         self.assertNotIn("registration_finish", json.loads(out.getvalue()))
-        no_finish.assert_not_called()
+        no_finish.assert_called_once_with(alias, finish_registration=False)
 
-    def test_wake_registration_result_never_exposes_challenge(self):
-        fake_module = types.SimpleNamespace(begin=lambda pairing: {
-            "state": "pending", "lastVerifiedAt": "2026-11-12T20:00:00Z",
-            "token": "private-token", "message": "private challenge"})
-        with patch.dict(sys.modules, {"wake_registration": fake_module}):
-            result = dbond.begin_wake_registration({"endpoint": "fixture"})
-        self.assertEqual(result["state"], "pending")
-        self.assertEqual(result["lastVerifiedAt"], "2026-11-12T20:00:00Z")
-        self.assertIn("2026", result["lastVerifiedLocal"])
-        self.assertNotIn("T20:00:00Z", result["lastVerifiedLocal"])
-        self.assertNotIn("token", json.dumps(result))
-        self.assertNotIn("private challenge", json.dumps(result))
+    def test_acknowledgement_sends_only_received_sequence(self):
+        import wake_registration
+        self.link("http://127.0.0.1:18768/v1/services/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/events")
+        response = {"state": "verified", "sequence": 8, "id": "@wake:11111111-2222-3333-4444-555555555555", "duplicate": False}
+        with patch.dict(sys.modules, {"dbond": dbond}), patch.object(dbond, "_request", return_value=(200, response)) as request:
+            receipt = wake_registration.acknowledge("test", 8)
+            self.assertEqual(receipt["sequence"], 8)
+            self.assertEqual(receipt["id"], response["id"])
+            self.assertFalse(receipt["duplicate"])
+            self.assertEqual(request.call_args.args[3], {"sequence": 8})
+            for invalid in (True, 0, -1, "8", 2**63):
+                with self.assertRaises(ValueError):
+                    wake_registration.acknowledge("test", invalid)
+            legacy_value = "obsolete-value"
+            with contextlib.redirect_stderr(io.StringIO()) as error, self.assertRaises(SystemExit):
+                dbond.parser().parse_args(["wake-ack", "test", legacy_value])
+            self.assertNotIn(legacy_value, error.getvalue())
+            self.assertEqual(request.call_count, 1)
+            request.return_value = (200, {**response, "sequence": 9})
+            with self.assertRaises(ValueError):
+                wake_registration.acknowledge("test", 8)
 
     def test_exact_session_binding_lookup_is_unique_and_private(self):
         endpoint = "http://127.0.0.1:18768/v1/services/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/events"

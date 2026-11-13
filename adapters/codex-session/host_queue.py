@@ -73,8 +73,9 @@ def pointer(thread: str, alias: str, lane: str, sequence: int, event_id: str,
                 "This is one notice for a pre-existing backlog, not a claim that every message is new.")
     elif lane == "direct":
         read = (f"Run `~/.local/bin/dbond direct-inbox {alias} --after {sequence - 1}` and read only "
-                f"the message with source ID {event_id}. If this is a current wake check, "
-                f"use its token with `~/.local/bin/dbond wake-ack {alias} TOKEN` once after reading it.")
+                f"the message with source ID {event_id}.")
+        if event_id.startswith("@wake:"):
+            read += f" If it is the current wake check, acknowledge it with `~/.local/bin/dbond wake-ack {alias} {sequence}`."
     else:
         read = (f"Run `~/.local/bin/dbond dot-inbox {alias} --after {sequence - 1} --through {sequence}` "
                 f"and read only Dot push {event_id}; "

@@ -172,8 +172,7 @@ def enrollment_reuse():
         with mock.patch.object(pathlib.Path, "home", return_value=home), \
              mock.patch.object(mcp.dbond, "APP_DIR", store), \
              mock.patch.object(mcp, "cli", side_effect=fake_cli), \
-             mock.patch.object(mcp.dbond, "session_status", return_value={"state":"pending_listener"}), \
-             mock.patch.object(mcp.dbond, "begin_wake_registration", return_value={"state":"pending"}), \
+             mock.patch.object(mcp.dbond, "session_status", return_value={"state":"pending_listener","wakeState":"offline"}), \
              mock.patch.object(mcp.dbond, "_peers", return_value=[{"id": service_id, "name": "Claude / Design review"}]):
             first = mcp.enroll({"topic": "Design review"})
             second = mcp.enroll({"topic": "Design review"})
@@ -183,7 +182,7 @@ def enrollment_reuse():
             assert first["activation"]["state"] == "host_monitor_required"
             assert second["listener"]["command"] == f"dbond session-listen {second['alias']}"
             assert second["session_status"]["state"] == "pending_listener"
-            assert second["wake"]["state"] == "pending"
+            assert second["wake"]["state"] == "offline"
             third = mcp.enroll({"topic": "Renamed title", "alias": first["alias"],
                                 "session_id": "11111111-2222-3333-4444-555555555555"})
             assert third["reused"] and third["reused_existing_alias"]
@@ -210,7 +209,7 @@ def concurrent_code_sessions_same_title():
     source = ROOT / "adapters/claude/server/mcp.py"
     manifest = json.loads((ROOT / "adapters/claude/plugin/.claude-plugin/plugin.json").read_text())
     channel_mcp = json.loads((ROOT / "adapters/claude/plugin/.mcp.json").read_text())
-    assert manifest["version"] == "0.1.9" and "userConfig" not in manifest
+    assert manifest["version"] == "0.1.10" and "userConfig" not in manifest
     assert channel_mcp["mcpServers"]["d-bond"]["env"] == {"DBOND_CLAUDE_CHANNEL": "1"}
     def instance(name):
         spec = importlib.util.spec_from_file_location(name, source)
@@ -243,7 +242,6 @@ def concurrent_code_sessions_same_title():
              mock.patch.object(first.dbond, "_initiating_claude", return_value=None), \
              mock.patch.object(first.dbond, "_peers", side_effect=lambda _: services), \
              mock.patch.object(first.dbond, "_owner_request", side_effect=lambda _: {"services": services}), \
-             mock.patch.object(first.dbond, "begin_wake_registration", return_value={"state": "pending"}), \
              mock.patch.object(first.dbond, "session_status", return_value={"state": "pending_listener"}), \
              mock.patch.object(first, "cli", side_effect=fake_cli), \
              mock.patch.object(second, "cli", side_effect=fake_cli):
@@ -315,9 +313,10 @@ def direct_tool_commands():
         else:
             raise AssertionError("owner note incorrectly accepted as an answer target")
         sender.assert_not_called()
-    with mock.patch.object(mcp, "cli", return_value={"state":"verified", "token":"never-return"}) as ack:
-        assert mcp.call_tool("acknowledge_wake", {"alias":"fixture", "token":"private-challenge"}) == {"state":"verified"}
-        ack.assert_called_once_with("wake-ack", "fixture", "private-challenge")
+    receipt = {"state": "verified", "sequence": 19, "duplicate": False, "id": "@wake:fixture"}
+    with mock.patch.object(mcp, "cli", return_value=receipt) as ack:
+        assert mcp.call_tool("acknowledge_wake", {"alias": "fixture", "sequence": 19}) == receipt
+        ack.assert_called_once_with("wake-ack", "fixture", 19)
     with mock.patch.object(mcp.dbond, "session_status", return_value={"state":"subscriber_present"}) as status:
         assert mcp.call_tool("session_status", {"alias":"fixture"})["state"] == "subscriber_present"
         assert mcp.call_tool("session_status", {"alias":"fixture", "finish_registration":True})["state"] == "subscriber_present"

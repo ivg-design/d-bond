@@ -20,7 +20,7 @@ import dbond
 import owner
 
 CHANNEL = os.environ.get("DBOND_CLAUDE_CHANNEL") == "1"
-VERSION = "0.1.9" if CHANNEL else "0.1.7"
+VERSION = "0.1.10" if CHANNEL else "0.1.8"
 # A legacy user-level plugin alias never chooses a channel stream. Explicit
 # migration passes that alias to enroll in the exact session instead.
 CHANNEL_IDENTITY_LOCK = threading.Lock()
@@ -28,12 +28,12 @@ CHANNEL_SESSION_ID = None
 OUTPUT_LOCK = threading.Lock()
 TOOLS = [
     ("local_status", "Check whether the D-Bond Mac app is installed and its owner service is reachable. Read-only; no pairing or credentials required.", {}, []),
-    ("enroll", "Save or reuse this exact chat's D-Bond pairing. Pass the host's exact session_id when available; Claude Code may resolve it from a verified same-user live ancestor. In THIS registration turn, start the native host Monitor using listener.command, call session_status with finish_registration=true after it attaches, then END setup now. Handle the delayed owner challenge in the later recipient turn and check wakeState there. Claude Code's genuine channel uses its native listener instead of Monitor. Pairing alone is pending, not connected.",
+    ("enroll", "Save or reuse this exact chat's D-Bond pairing. Pass the host's exact session_id when available; Claude Code may resolve it from a verified same-user live ancestor. In THIS registration turn, start the native host Monitor using listener.command, call session_status with finish_registration=true after it attaches, then END setup now. If a wake check is pending, handle it in the receiving turn and check wakeState there. Claude Code's genuine channel uses its native listener instead of Monitor. Pairing alone is pending, not connected.",
      {"topic": "The actual topic of this chat", "service": "Service name; defaults to Claude", "alias": "Optional short local pairing alias", "display_name": "Optional explicit full display name, such as Claude / Design review", "session_id": "Exact host Claude session UUID, required when no verified Claude Code ancestor is available"}, []),
-    ("session_status", "Read owner-observed subscriptions by default. Set finish_registration=true only after the registration listener attaches to schedule one delayed proof; then END setup and handle its owner challenge in the later turn. Repeating the finish request is broker-idempotent. subscriber_present alone is not a model turn.",
+    ("session_status", "Read owner-observed subscriptions by default. Set finish_registration=true only after the registration listener attaches to schedule one delayed proof; then END setup and handle its owner wake check in the later turn. Repeating the finish request is broker-idempotent. subscriber_present alone is not a model turn.",
      {"alias": "Local pairing alias", "finish_registration": "Explicitly schedule delayed registration proof after listener attachment"}, ["alias"]),
-    ("acknowledge_wake", "Acknowledge only the exact private registration challenge delivered as an authenticated owner direct message to this session. It records an authenticated app-level roundtrip while the stream is active; host model wake still needs separate evidence. Never use a token from another source.",
-     {"alias": "Local pairing alias", "token": "Exact token in the authenticated owner challenge"}, ["alias", "token"]),
+    ("acknowledge_wake", "Acknowledge the owner wake check delivered to this session using its broker sequence.",
+     {"alias": "Local pairing alias", "sequence": "Positive broker sequence of the received wake check"}, ["alias", "sequence"]),
     ("peers", "List paired D-Bond connections by display name and ID.", {"alias": "Local pairing alias"}, ["alias"]),
     ("ask", "Ask Dot or an addressed paired connection through Dot. Waits for a final reply or returns the latest receipt state on timeout.",
      {"alias": "Local pairing alias", "text": "Question or message", "to": "Optional recipient display name or service UUID from peers", "timeout": "Seconds to wait, 1–300"}, ["alias", "text"]),
@@ -54,7 +54,7 @@ TOOLS = [
 
 def tool_schema(name, description, fields, required):
     return {"name": name, "description": description, "inputSchema": {"type": "object", "properties": {
-        key: {"type": "integer" if key == "timeout" else "boolean" if key == "finish_registration" else "string", "description": description}
+        key: {"type": "integer" if key in ("timeout", "sequence") else "boolean" if key == "finish_registration" else "string", "description": description}
         for key, description in fields.items()}, "required": required, "additionalProperties": False}}
 
 
@@ -169,8 +169,11 @@ def call_tool(name, args):
     if name == "session_status":
         return dbond.session_status(alias, finish_registration=args.get("finish_registration", False))
     if name == "acknowledge_wake":
-        value = cli("wake-ack", alias, args["token"])
-        return {key: value[key] for key in ("state", "wakeState", "lastWakeVerifiedAt", "lastWakeVerifiedLocal", "verification", "reason") if key in value}
+        sequence = args["sequence"]
+        if type(sequence) is not int or not 1 <= sequence <= 2**63 - 1:
+            raise ValueError("Expected the positive broker sequence of the received wake check")
+        value = cli("wake-ack", alias, sequence)
+        return {key: value[key] for key in ("state", "sequence", "id", "duplicate", "connection_id") if key in value}
     if name == "peers":
         return cli("peers", alias)
     if name == "ask":
@@ -333,16 +336,16 @@ def enrollment_result(result, alias, session_id):
             if CHANNEL_SESSION_ID and CHANNEL_SESSION_ID != session_id:
                 raise ValueError("This running channel belongs to another Claude Code session")
             CHANNEL_SESSION_ID = session_id
-    wake = dbond.begin_wake_registration(dbond._read_pairing(alias))
+    status = dbond.session_status(alias)
     listener = ({"mode": "native_channel", "streams": ["direct", "dot"],
                  "verify_command": f"dbond session-status {alias} --finish-registration",
-                 "instruction": "Claude Code's initialized channel owns the two streams. After they attach, call session_status with finish_registration=true, then END setup. Handle the delayed authenticated owner challenge in the later recipient turn. Do not start another Monitor."}
+                 "instruction": "Claude Code's initialized channel owns the two streams. After they attach, call session_status with finish_registration=true, then END setup. If a wake check is pending, handle it in the receiving turn. Do not start another Monitor."}
                 if CHANNEL else dbond.session_listener_guidance(alias))
     result = {**result, "listener": listener, "pairing_state": "saved", "binding": binding,
-              "wake": wake, "session_status": dbond.session_status(alias)}
+              "wake": dbond.registration_wake_status(status), "session_status": status}
     if CHANNEL:
         result["activation"] = {"state": "native_channel_starting",
-                                "instruction": "This Claude Code channel listens through its initialized native push streams. Once attached, call session_status with finish_registration=true and END setup. Await the later owner challenge; a broker subscriber is not proof of a model turn."}
+                                "instruction": "This Claude Code channel listens through its initialized native push streams. Once attached, call session_status with finish_registration=true and END setup. A verified pairing is ready. If a wake check is pending, acknowledge its sequence when it arrives."}
     else:
         result["activation"] = {"state": "host_monitor_required",
                                 "instruction": result["listener"]["instruction"]}

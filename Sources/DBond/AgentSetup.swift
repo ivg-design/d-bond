@@ -183,6 +183,13 @@ final class AgentSetup: NSObject, NSWindowDelegate {
         return value["version"] as? String
     }
 
+    static func availableDesktopUpdate(installed: String, installers: URL?) -> String? {
+        let manifest = installers?.appendingPathComponent("claude-desktop-manifest.json")
+        guard let shipped = manifestVersion(manifest),
+              installed.compare(shipped, options: .numeric) == .orderedAscending else { return nil }
+        return shipped
+    }
+
     private func setAction(_ control: NSButton, _ title: String, enabled: Bool) {
         control.title = title; control.isEnabled = enabled && !saving
     }
@@ -193,12 +200,12 @@ final class AgentSetup: NSObject, NSWindowDelegate {
         let id = "local.mcpb.ivg.d-bond", fm = FileManager.default
         let file = root.appendingPathComponent("Claude Extensions/" + id + "/manifest.json")
         let state = root.appendingPathComponent("Claude Extensions Settings/" + id + ".json")
-        let shipped = Self.manifestVersion(Bundle.main.url(forResource:"plugin",withExtension:"json",subdirectory:"agent-installers/claude-code-marketplace/plugin/.claude-plugin"))
+        let installers = Bundle.main.resourceURL?.appendingPathComponent("agent-installers", isDirectory: true)
         let app = NSWorkspace.shared.urlForApplication(withBundleIdentifier:"com.anthropic.claudefordesktop")
         if let installed = Self.manifestVersion(file) {
             var label = "Installed " + installed
             if let data = try? Data(contentsOf:state), let obj = (try? JSONSerialization.jsonObject(with:data)) as? [String:Any], let enabled = obj["isEnabled"] as? Bool { label += enabled ? " · Enabled" : " · Disabled" }
-            if let shipped, installed.compare(shipped, options:.numeric) == .orderedAscending {
+            if let shipped = Self.availableDesktopUpdate(installed: installed, installers: installers) {
                 desktopState.stringValue = label + " · Version " + shipped + " available"
                 setAction(desktopAction,"Open update in Claude…",enabled:app != nil)
             } else { desktopState.stringValue = label; setAction(desktopAction,"Already installed",enabled:false) }

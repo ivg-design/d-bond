@@ -16,12 +16,12 @@ listener's status socket. The socket lives in a short owner-only `/tmp` director
 to stay within macOS's UNIX socket path limit; durable state remains in
 Application Support. `ready: true` means both required SSE streams (direct
 only for a peer pairing) and that chat's local owner are present. `wakeState`
-reports the broker's authenticated wake challenge separately. Neither state
+reports the broker's wake check separately. Neither state
 proves that the model read a message, answered, or completed an action.
 
 The listener stores separate direct and Dot cursors and one-attempt receipts.
 On first attach it collapses a pre-existing backlog into one pointer for each
-stream while preserving the broker's full history; a current wake challenge
+stream while preserving the broker's full history; a current wake check
 is delivered separately. It replays events after a Mac, app, or listener
 restart. A host-offline preflight waits and retries. After a queue attempt
 begins, an uncertain outcome is recorded and never automatically resent.

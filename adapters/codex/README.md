@@ -14,7 +14,7 @@ codex plugin add d-bond-local-control@d-bond-local
 
 The build stages the same generic direct server and CLI protocol modules used by `adapters/direct`. It contains no saved pairing or credential. The Mac app must also be installed for the owner socket and Codex session listener. Codex may need a new chat to discover newly installed tools. Update or reinstall through Codex; do not hand-edit its cache.
 
-An older Mac may already have the separate `d-bond-agent` stdio MCP server. It continues to work with its existing tool names and pairing. Local Control 0.1.5 includes those direct tools, so a new install does not add a second server. Agent Setup leaves any existing `d-bond-agent` registration untouched.
+An older Mac may already have the separate `d-bond-agent` stdio MCP server. It continues to work with its existing tool names and pairing. Local Control 0.1.6 includes those direct tools, so a new install does not add a second server. Agent Setup leaves any existing `d-bond-agent` registration untouched.
 
 ## Use
 
@@ -29,7 +29,7 @@ current SOP again and reconcile the rules before retrying.
 
 Trace tools report observed event states and the SOP **version** captured for the event, not the full policy text. Times use this Mac’s timezone and omit fractions of a second. A receipt state is not proof of downstream delivery.
 
-For a Codex chat, `enroll_agent` requires that chat’s exact `thread_id` and a `Codex /` title. It reuses a matching alias or enrolls one pairing in the owner-local CLI store, attaches the installed session listener, and starts a broker wake challenge. Check its returned listener and wake state; a stored request, listener count, or pending challenge is not a verified host turn. `acknowledge_wake` uses only a token delivered to that session. A verified acknowledgement applies to that listener generation and becomes historical after disconnect.
+For a Codex chat, `enroll_agent` requires that chat’s exact `thread_id` and a `Codex /` title. It reuses a matching alias or enrolls one pairing in the owner-local CLI store, attaches the installed session listener, and schedules one wake check after the listener attaches. In the recipient turn, call `acknowledge_wake` with the sequence of the delivered check. The broker records the receipt and retains it when the session reconnects. The listener status shows whether the stream is currently open.
 
 Use `send_direct_message` with a stable `message_id` for retry. A direct answer must use the received message’s exact `sender_id` as `to` and its `source_id` as `in_reply_to`; `answer_direct_message` preserves this correlation. `receive_direct_messages` is an explicit bounded read. `ask_dot`, `wait_for_dot_push`, and `answer_dot_push` retain their separate correlated Dot route. A broker send receipt does not prove the recipient agent read or answered.
 

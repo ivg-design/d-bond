@@ -31,6 +31,15 @@ struct AgentSetupFixture {
         let app = NSApplication.shared
         app.setActivationPolicy(.accessory)
         let directory = URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true)
+        let installers = directory.deletingLastPathComponent().appendingPathComponent("agent-installers")
+        let code = installers.appendingPathComponent("claude-code-marketplace/plugin/.claude-plugin")
+        try FileManager.default.createDirectory(at: code, withIntermediateDirectories: true)
+        try Data(#"{"version":"0.1.10"}"#.utf8).write(to: code.appendingPathComponent("plugin.json"))
+        try Data(#"{"version":"0.1.8"}"#.utf8).write(to: installers.appendingPathComponent("claude-desktop-manifest.json"))
+        require(AgentSetup.availableDesktopUpdate(installed: "0.1.7", installers: installers) == "0.1.8",
+                "Desktop must show its own newer package")
+        require(AgentSetup.availableDesktopUpdate(installed: "0.1.8", installers: installers) == nil,
+                "A current Desktop extension must stay current when the Code plugin is newer")
         let hub = try Hub(directory: directory, port: 0)
         var first: NSWindow?
         for iteration in 0..<4 {
