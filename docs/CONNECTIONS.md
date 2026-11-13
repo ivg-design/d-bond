@@ -6,7 +6,7 @@ On a Mac with Swift 5.9+ and macOS 13 or later, run the following from the sourc
 bash scripts/install_app.sh
 ```
 
-Quit an older running D-Bond before upgrading. If it was already listed under **System Settings → General → Login Items & Extensions → Open at Login**, remove that older entry before installing; the installer starts one per-user launchd job instead. The job opens D-Bond at login and restarts it after an abnormal exit. **Quit D-Bond** exits normally and keeps it stopped until the next login. In **D-Bond → Settings…** (⌘,), **Start D-Bond at login** enables or disables the installed job. **Open Connections at launch** opens the connections window on startup. A first setup opens Connections automatically. The menu and Settings both show the running version and build. The installer does not remove pairings, credentials or receipts.
+Quit an older running D-Bond before upgrading. If it was already listed under **System Settings → General → Login Items & Extensions → Open at Login**, remove that older entry before installing; the installer starts one per-user launchd job instead. The job opens D-Bond at login and restarts it after an abnormal exit. **Quit D-Bond** exits normally and keeps it stopped until the next login. The installer does not remove pairings, credentials or receipts.
 
 The app runs in the menu bar. Opening it again brings up **Connections**. A fresh installation can test **Local demo echo** immediately. To reach your actual Dot you also need your own compatible Dot Bridge Transport and its single native `d-bond` subscription. Installing the Mac app alone doesn't create that account connection.
 
@@ -16,7 +16,7 @@ On an agent connection row, **Connect session…** shows the direct listener, Do
 
 ## App settings
 
-Choose **Settings…** from the D-Bond menu or press **⌘,** while a D-Bond window is active. **Start at Login** controls automatic startup on this Mac. **Open Connections at launch** controls whether the Connections window opens each time. The menu and Settings both show the installed version and build.
+Choose **Settings…** from the D-Bond menu or press **⌘,** while a D-Bond window is active. **Start D-Bond at login** controls automatic startup on this Mac. **Open Connections at launch** opens the Connections window each time; first-time setup opens it automatically. The menu and Settings show the installed version and build.
 
 ## Connect a service
 
