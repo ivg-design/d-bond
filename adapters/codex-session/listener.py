@@ -20,6 +20,7 @@ import tempfile
 import threading
 import time
 import uuid
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -198,6 +199,27 @@ def report_host_unconfirmed(bound: dict, event: dict) -> None:
         raise OSError("Broker receipt pending")
 
 
+def observed_at() -> str:
+    """Owner-local timestamp with seconds and an explicit UTC offset."""
+    return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def observe_owner(receipt: Path, record: dict, available: bool) -> None:
+    # Record transitions, not each three-second retry: lastUnavailableAt is the
+    # beginning of the most recent outage episode, not a polling heartbeat.
+    state = "available" if available else "unavailable"
+    if record.get("ownerState") == state:
+        return
+    previous = record.get("ownerState")
+    record["ownerState"] = state
+    if not available or previous == "unavailable":
+        prefix = "ownerRecovered" if available else "ownerUnavailable"
+        stamp = observed_at()
+        record.setdefault(prefix + "FirstAt", stamp)
+        record[prefix + "LastAt"] = stamp
+    save_json(receipt, record)
+
+
 def process_event(event: dict, bound: dict, folder: dict, lane: str = "direct",
                   submit=submit_message, discover=ipc.discover_owner,
                   cli: Path | None = None, retained: bool = False,
@@ -210,6 +232,9 @@ def process_event(event: dict, bound: dict, folder: dict, lane: str = "direct",
         record = private_json(receipt)
         if record.get("event_id") != event["id"]:
             raise ValueError("Broker sequence identity changed")
+        if "firstObservedAt" not in record:
+            record["firstObservedAt"] = observed_at()
+            save_json(receipt, record)
         if record["phase"] == "sending":
             record["phase"] = "ambiguous"
             if lane == "direct" and event["from"] != "owner":
@@ -220,14 +245,17 @@ def process_event(event: dict, bound: dict, folder: dict, lane: str = "direct",
             advance(cursor_path, event["sequence"])
             return "already_attempted"
     except FileNotFoundError:
-        record = {"event_id": event["id"], "sequence": event["sequence"], "lane": lane, "phase": "ready"}
+        record = {"event_id": event["id"], "sequence": event["sequence"], "lane": lane, "phase": "ready",
+                  "firstObservedAt": observed_at()}
         save_json(receipt, record)
 
     if record["phase"] == "ready":
         try:
             thread_owner = discover(bound["thread_id"], host_id=bound["host_id"], timeout=5)
         except (ipc.CodexWakeError, OSError):
+            observe_owner(receipt, record, False)
             return "owner_offline"
+        observe_owner(receipt, record, True)
         prompt = host_queue.inline_message(bound["alias"], lane, event, retained=retained,
                                            sender_name=event.get("sender_name"))
         save_json(receipt, {**record, "phase": "sending"})
@@ -235,7 +263,7 @@ def process_event(event: dict, bound: dict, folder: dict, lane: str = "direct",
             outcome = submit(cli, bound["thread_id"], prompt, thread_owner, timeout=20)
         except ipc.OwnerUnavailable:
             # Owner discovery failed before any host turn could be submitted.
-            save_json(receipt, record)
+            observe_owner(receipt, record, False)
             return "owner_offline"
         except Exception:
             outcome = {"phase": "ambiguous"}
@@ -282,6 +310,8 @@ class StatusServer:
                       "transport": "offline", "host": "unknown", "wakeState": "unknown",
                       "ready": False}
         self.guard = threading.Lock()
+        self.pending_lanes: dict[str, dict] = {}
+        self.persisted = None
         try:
             info = path.lstat()
             if not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.getuid():
@@ -311,13 +341,33 @@ class StatusServer:
             self._derive()
             self._persist()
 
+    def pending(self, lane: str, record: dict | None = None, reason: str | None = None):
+        with self.guard:
+            if record is None:
+                self.pending_lanes.pop(lane, None)
+                if not self.pending_lanes:
+                    self.value["reason"] = None
+            else:
+                self.pending_lanes[lane] = {k: v for k, v in record.items()
+                    if k == "sequence" or k == "firstObservedAt" or k.startswith("owner")}
+                self.pending_lanes[lane]["reason"] = reason
+            self.value["pending"] = dict(self.pending_lanes)
+            self._derive()
+            self._persist()
+
     def _persist(self):
-        save_json(self.health_path, self.value)
+        snapshot = json.dumps(self.value, sort_keys=True)
+        if snapshot != self.persisted:
+            save_json(self.health_path, self.value)
+            self.persisted = snapshot
 
     def _derive(self):
         complete = self.required.issubset(self.open_streams)
         self.value["transport"] = "subscribed" if complete else "partial" if self.open_streams else "offline"
-        self.value["ready"] = complete and self.value.get("host") == "owner_available"
+        pending = self.pending_lanes
+        self.value["ready"] = complete and self.value.get("host") == "owner_available" and not pending
+        if pending:
+            self.value["reason"] = next(iter(pending.values()))["reason"]
         if self.value["state"] not in ("blocked",):
             self.value["state"] = "listening" if self.value["ready"] else "degraded"
 
@@ -391,7 +441,7 @@ def refreshed_status(thread: str, value: dict) -> dict:
         value["wakeState"] = "unknown"
         broker_ready = False
     value["ready"] = (value.get("transport") == "subscribed" and
-                      host == "owner_available" and broker_ready)
+                      host == "owner_available" and broker_ready and not value.get("pending"))
     if value.get("state") != "blocked":
         value["state"] = "listening" if value["ready"] else "degraded"
     return value
@@ -446,12 +496,14 @@ def deliver(event: dict, bound: dict, folder: dict, lane: str, server: StatusSer
         outcome = process_event(event, bound, folder, lane, retained=retained)
         if outcome not in ("owner_offline", "receipt_pending"):
             break
-        server.update(reason=outcome, host="owner_offline" if outcome == "owner_offline" else "owner_available",
-                      state="degraded")
+        record = private_json(receipt_file(folder["receipts"], event, lane))
+        server.pending(lane, record, outcome)
+        server.update(host="owner_offline" if outcome == "owner_offline" else "owner_available")
         if EXIT.wait(3):
             return outcome
     else:
         return "stopped"
+    server.pending(lane)
     if outcome in ("steered", "started", "already_attempted"):
         server.update(state="listening", host="owner_available", reason=None)
     elif outcome == "ambiguous":

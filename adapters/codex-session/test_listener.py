@@ -70,6 +70,88 @@ class FakeHost:
 
 
 class ListenerTests(unittest.TestCase):
+    def test_observation_timestamp_is_local_seconds_with_offset(self):
+        stamp = listener.observed_at()
+        self.assertRegex(stamp, r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}$")
+        self.assertNotIn(".", stamp)
+
+    def test_owner_outage_diagnostics_survive_retry_restart_and_recovery(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            folders = {"receipts": root / "receipts", "cursor_direct": root / "direct.json",
+                       "cursor_dot": root / "dot.json"}
+            folders["receipts"].mkdir(mode=0o700)
+            discover = Mock(side_effect=ipc.OwnerUnavailable("not attached"))
+            submit = Mock(return_value={"phase": "started"})
+            kwargs = {"discover": discover, "submit": submit, "acknowledge": Mock()}
+            stamps = ["2026-11-14T07:18:44-05:00", "2026-11-14T07:18:45-05:00",
+                      "2026-11-14T07:29:07-05:00"]
+            with patch.object(listener, "observed_at", side_effect=stamps), \
+                 patch.object(listener, "save_json", wraps=listener.save_json) as save:
+                self.assertEqual(listener.process_event(EVENT, BOUND, folders, **kwargs), "owner_offline")
+                count = save.call_count
+                self.assertEqual(listener.process_event(EVENT, BOUND, folders, **kwargs), "owner_offline")
+                self.assertEqual(save.call_count, count)
+                receipt = listener.receipt_file(folders["receipts"], EVENT)
+                record = listener.private_json(receipt)
+                self.assertEqual(record["firstObservedAt"], stamps[0])
+                self.assertEqual(record["ownerUnavailableFirstAt"], stamps[1])
+                self.assertEqual(record["ownerUnavailableLastAt"], stamps[1])
+                self.assertNotIn(EVENT["text"], json.dumps(record))
+                # process_event reloads the durable receipt on every invocation.
+                discover.side_effect = None
+                discover.return_value = {"supports_untrusted_app_input": True}
+                self.assertEqual(listener.process_event(EVENT, BOUND, folders, **kwargs), "started")
+                record = listener.private_json(receipt)
+                self.assertEqual(record["ownerRecoveredFirstAt"], stamps[2])
+                self.assertEqual(record["ownerRecoveredLastAt"], stamps[2])
+                self.assertEqual(listener.process_event(EVENT, BOUND, folders, **kwargs), "already_attempted")
+                submit.assert_called_once()
+
+    def test_owner_episode_history_keeps_first_and_latest_transitions(self):
+        with tempfile.TemporaryDirectory() as temp:
+            receipt = Path(temp) / "receipt.json"
+            record = {"event_id": EVENT["id"], "sequence": 12}
+            with patch.object(listener, "observed_at", side_effect=["a", "b", "c", "d"]):
+                for available in (False, False, True, True, False, True):
+                    listener.observe_owner(receipt, record, available)
+            self.assertEqual(record["ownerUnavailableFirstAt"], "a")
+            self.assertEqual(record["ownerUnavailableLastAt"], "c")
+            self.assertEqual(record["ownerRecoveredFirstAt"], "b")
+            self.assertEqual(record["ownerRecoveredLastAt"], "d")
+
+    def test_pending_status_is_lane_scoped_and_identical_retries_do_not_write(self):
+        with tempfile.TemporaryDirectory() as temp:
+            listener.EXIT.clear()
+            server = listener.StatusServer(Path(temp) / "status.sock", THREAD, SERVICE, ["direct", "dot"])
+            try:
+                server.update(host="owner_available")
+                server.stream("direct", True)
+                server.stream("dot", True)
+                direct = {"sequence": 12, "firstObservedAt": "2026-11-14T07:18:44-05:00",
+                          "text": "must not persist", "ownerState": "unavailable"}
+                dot = {"sequence": 13}
+                with patch.object(listener, "save_json", wraps=listener.save_json) as save:
+                    server.pending("direct", direct, "owner_offline")
+                    count = save.call_count
+                    server.pending("direct", direct, "owner_offline")
+                    self.assertEqual(save.call_count, count)
+                    server.pending("dot", dot, "receipt_pending")
+                    server.pending("dot")
+                    server.update(host="owner_available", reason=None)
+                    self.assertFalse(server.value["ready"])
+                    self.assertEqual(server.value["reason"], "owner_offline")
+                    self.assertEqual(server.value["pending"]["direct"]["sequence"], 12)
+                    self.assertNotIn("text", server.value["pending"]["direct"])
+                    server.pending("direct")
+                    self.assertTrue(server.value["ready"])
+                    self.assertIsNone(server.value["reason"])
+                    self.assertEqual(server.value["pending"], {})
+            finally:
+                listener.EXIT.set()
+                server.close()
+                listener.EXIT.clear()
+
     def test_existing_local_binding_and_durable_install(self):
         alias = BOUND["alias"]
         with tempfile.TemporaryDirectory() as tmp, patch.object(listener, "STATE_DIR", Path(tmp) / "state"), \
@@ -423,6 +505,8 @@ class ListenerTests(unittest.TestCase):
             self.assertEqual(fresh["wakeState"], "verified")
             discover.assert_called_once()
             broker.assert_called_once_with(BOUND["alias"])
+            pending = {**raw, "pending": {"direct": {"sequence": 12, "reason": "owner_offline"}}}
+            self.assertFalse(listener.refreshed_status(THREAD, pending)["ready"])
         with patch.object(listener.ipc, "discover_owner", side_effect=ipc.OwnerUnavailable("closed")), \
              patch.object(listener, "binding", return_value=BOUND), \
              patch.object(listener.dbond, "session_status", return_value=observed):

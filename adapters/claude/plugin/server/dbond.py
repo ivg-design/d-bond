@@ -1170,6 +1170,14 @@ def command_session_status(args) -> None:
         except (ImportError, OSError, ValueError):
             result["receiver"] = {"state": "unconfirmed", "ready": False,
                                   "reason": "native_receiver_health_unavailable"}
+    elif pairing.get("client") == "codex" and pairing.get("session_id"):
+        try:
+            from codex_registration import status as listener_status
+            service_id = pairing["endpoint"].split("/services/", 1)[1].split("/", 1)[0].lower()
+            result["receiver"] = listener_status(pairing["session_id"], service_id)
+        except (ImportError, OSError, ValueError, KeyError, IndexError):
+            result["receiver"] = {"state": "unconfirmed", "ready": False,
+                                  "reason": "codex_listener_health_unavailable"}
     print(json.dumps(result, ensure_ascii=False))
 
 

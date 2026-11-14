@@ -21,6 +21,7 @@ def main():
                         "-mmacosx-version-min=11.0", str(HERE / "server/launcher.c"), "-o", str(launcher)], check=True)
         with zipfile.ZipFile(OUTPUT, "w", zipfile.ZIP_DEFLATED) as bundle:
             for name, src in [("manifest.json", HERE / "manifest.json"),
+                              ("LICENSE", ROOT / "LICENSE"),
                               ("server/d-bond-launcher", launcher),
                               ("server/launch.sh", HERE / "server/launch.sh"),
                               ("server/mcp.py", HERE / "server/mcp.py"),

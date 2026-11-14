@@ -1,6 +1,6 @@
 # Install and connect D-Bond
 
-On a Mac with Swift 5.9+ and macOS 13 or later, run the following from the source checkout:
+On a Mac with Swift 5.9+, Python 3.11+, and macOS 13 or later, run the following from the source checkout:
 
 ```sh
 bash scripts/install_app.sh

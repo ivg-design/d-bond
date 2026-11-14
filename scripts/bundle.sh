@@ -10,10 +10,12 @@ BUNDLE_ID="${DBOND_BUNDLE_ID:-design.ivg.dbond}"
 [[ "$BUNDLE_ID" =~ ^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$ ]] || { echo "Invalid bundle identifier" >&2; exit 1; }
 
 cd "$ROOT"
-swift build -c release --product DBond
+swift build -c release --product DBond -Xswiftc -DDBOND_APP_BUNDLE
 mkdir -p "$BIN_DIR" "$RES_DIR"
 product_dir="$(swift build -c release --show-bin-path)"
 cp "$product_dir/DBond" "$BIN_DIR/DBond"
+/usr/bin/strip -S "$BIN_DIR/DBond"
+install -m 644 "$ROOT/LICENSE" "$ROOT/THIRD_PARTY_NOTICES.md" "$RES_DIR/"
 cp "$ROOT/scripts/native_link.py" "$RES_DIR/"
 install -m 755 "$ROOT/adapters/cli/dbond.py" "$RES_DIR/dbond"
 for module in owner.py wake_registration.py codex_registration.py claude_registration.py; do
@@ -87,8 +89,8 @@ cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
   <key>CFBundleIconFile</key><string>D-Bond.icns</string>
   <key>CFBundleName</key><string>D-Bond</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.3.9</string>
-  <key>CFBundleVersion</key><string>12</string>
+  <key>CFBundleShortVersionString</key><string>0.3.10</string>
+  <key>CFBundleVersion</key><string>13</string>
   <key>LSUIElement</key><true/>
   <key>NSHighResolutionCapable</key><true/>
 </dict>

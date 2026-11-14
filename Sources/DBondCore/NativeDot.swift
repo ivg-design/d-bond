@@ -3,8 +3,13 @@ import Foundation
 private func nativeCommand(_ mode:String) throws -> (Process,Pipe) {
     let fm = FileManager.default
     let python = URL(fileURLWithPath: ProcessInfo.processInfo.environment["DBOND_DOT_PYTHON"] ?? fm.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/DotBridge/venv/bin/python").path)
-    let source = URL(fileURLWithPath:#filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("scripts/native_link.py")
-    let helper = Bundle.main.bundleURL.pathExtension == "app" ? Bundle.main.url(forResource:"native_link",withExtension:"py") : source
+    #if DBOND_APP_BUNDLE
+    let helper = Bundle.main.url(forResource: "native_link", withExtension: "py")
+    #else
+    // SwiftPM probes run directly from the source checkout.
+    let source = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("scripts/native_link.py")
+    let helper = Bundle.main.bundleURL.pathExtension == "app" ? Bundle.main.url(forResource: "native_link", withExtension: "py") : source
+    #endif
     guard let helper, fm.isExecutableFile(atPath:python.path), fm.fileExists(atPath:helper.path) else { throw Fault.message("Native Dot helper unavailable.") }
     let p=Process(), out=Pipe()
     p.executableURL=python; p.arguments=["-I",helper.path,mode]; p.standardOutput=out; p.standardError=FileHandle.nullDevice
