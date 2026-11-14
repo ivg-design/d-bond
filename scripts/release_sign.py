@@ -17,6 +17,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 MAGIC = {b"\xcf\xfa\xed\xfe", b"\xfe\xed\xfa\xcf", b"\xca\xfe\xba\xbe",
@@ -82,16 +83,30 @@ def fingerprint(app: Path) -> str:
 
 def signature(path: Path, developer: bool, team: str | None = None) -> str | None:
     command(["/usr/bin/codesign", "--verify", "--strict", path])
-    info = command(["/usr/bin/codesign", "-d", "--verbose=4", path]).stderr
     if not developer:
         return None
+    # Universal binaries must satisfy distribution requirements on every slice.
+    binary = path
+    if path.is_dir():
+        metadata = plistlib.loads((path / "Contents/Info.plist").read_bytes())
+        binary = path / "Contents/MacOS" / metadata["CFBundleExecutable"]
+    architectures = command(["/usr/bin/lipo", "-archs", binary]).stdout.split()
+    current = team
+    for architecture in architectures:
+        current = signature_slice(path, architecture, current)
+    return current
+
+
+def signature_slice(path: Path, architecture: str, team: str | None) -> str:
+    info = command(["/usr/bin/codesign", "-d", "--verbose=4", "--arch", architecture, path]).stderr
     if "Authority=Developer ID Application:" not in info or "runtime" not in info or "Timestamp=" not in info:
         raise RuntimeError("A nested executable lacks Developer ID, hardened runtime, or secure timestamp")
     match = re.search(r"^TeamIdentifier=(\S+)$", info, re.MULTILINE)
     current = match.group(1) if match else None
     if current is None or (team is not None and current != team):
         raise RuntimeError("Nested executable signing team does not match the app")
-    entitlements = command(["/usr/bin/codesign", "-d", "--entitlements", ":-", path], allow_failure=True)
+    entitlements = command(["/usr/bin/codesign", "-d", "--arch", architecture,
+                            "--entitlements", ":-", path], allow_failure=True)
     text = entitlements.stdout
     if text.strip():
         try:
@@ -103,14 +118,55 @@ def signature(path: Path, developer: bool, team: str | None = None) -> str | Non
     return current
 
 
-def verify(app: Path, mode: str) -> dict:
+def verify_archive(archive: Path, developer: bool, team: str | None, depth: int = 0) -> int:
+    """Inspect archived executables without trusting ZIP extraction paths."""
+    if depth > 4:
+        raise ValueError("Embedded archive nesting is too deep")
+    count = 0
+    with tempfile.TemporaryDirectory(prefix="dbond-archive-signature-") as temp:
+        with zipfile.ZipFile(archive) as source:
+            names = set()
+            for entry in source.infolist():
+                name = Path(entry.filename)
+                if name.is_absolute() or ".." in name.parts or entry.filename in names:
+                    raise ValueError("Unsafe or duplicate embedded archive path")
+                names.add(entry.filename)
+                if entry.is_dir():
+                    continue
+                if entry.file_size > 256 * 1024 * 1024:
+                    raise ValueError("Embedded archive member is too large")
+                with source.open(entry) as stream:
+                    header = stream.read(4)
+                    nested = name.suffix.lower() in (".mcpb", ".zip")
+                    if header not in MAGIC and not nested:
+                        continue
+                    target = Path(temp) / str(len(names))
+                    with target.open("wb") as output:
+                        output.write(header)
+                        for block in iter(lambda: stream.read(1024 * 1024), b""):
+                            output.write(block)
+                if nested:
+                    count += verify_archive(target, developer, team, depth + 1)
+                else:
+                    signature(target, developer, team)
+                    count += 1
+    return count
+
+
+def verify(app: Path, mode: str, standalone_mcpb: Path | None = None) -> dict:
     command(["/usr/bin/codesign", "--verify", "--deep", "--strict", app])
     developer = mode == "developer-id"
     team = signature(app, developer)
     binaries = macho_files(app)
     for binary in binaries:
         signature(binary, developer, team)
-    return {"mode": mode, "nestedMachO": len(binaries), "verified": True,
+    archived = sum(verify_archive(path, developer, team) for path in app.rglob("*")
+                   if path.is_file() and path.suffix.lower() in (".mcpb", ".zip"))
+    if standalone_mcpb is not None:
+        embedded = app / "Contents/Resources/agent-installers/d-bond-claude.mcpb"
+        if hashlib.sha256(embedded.read_bytes()).digest() != hashlib.sha256(standalone_mcpb.read_bytes()).digest():
+            raise RuntimeError("Standalone MCPB differs from the signed archive embedded in the app")
+    return {"mode": mode, "nestedMachO": len(binaries), "archivedMachO": archived, "verified": True,
             "bundleDigest": fingerprint(app)}
 
 
@@ -129,6 +185,17 @@ def sign(app: Path, mode: str) -> dict:
         command(["/usr/bin/codesign"] + flags + [bundle])
     command(["/usr/bin/codesign"] + flags + [app])
     return verify(app, mode)
+
+
+def sign_binary(path: Path, mode: str) -> dict:
+    """Sign compiled archive members before the containing MCPB is created."""
+    selected = identity() if mode == "developer-id" else "-"
+    flags = ["--force", "--sign", selected]
+    if mode == "developer-id":
+        flags += ["--options", "runtime", "--timestamp"]
+    command(["/usr/bin/codesign"] + flags + [path])
+    signature(path, mode == "developer-id")
+    return {"mode": mode, "verified": True}
 
 
 def profile() -> str:
@@ -216,8 +283,10 @@ def notarize(app: Path, expected: str, receipts: Path) -> dict:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("preflight", "sign", "verify", "fingerprint", "notarize"))
+    parser.add_argument("action", choices=("preflight", "sign", "sign-binary", "verify", "fingerprint", "notarize"))
     parser.add_argument("--app", type=Path)
+    parser.add_argument("--binary", type=Path)
+    parser.add_argument("--standalone-mcpb", type=Path)
     parser.add_argument("--mode", choices=("adhoc", "developer-id"), default=os.environ.get("DBOND_SIGNING_MODE", "adhoc"))
     parser.add_argument("--expected-digest")
     parser.add_argument("--receipt-dir", type=Path, default=ROOT / ".build/notarization")
@@ -226,6 +295,10 @@ def main() -> None:
         parser.error("Unsupported DBOND_SIGNING_MODE")
     if args.action == "preflight":
         result = preflight()
+    elif args.action == "sign-binary":
+        if args.binary is None:
+            parser.error("--binary is required")
+        result = sign_binary(args.binary.expanduser().resolve(strict=True), args.mode)
     else:
         if args.app is None:
             parser.error("--app is required")
@@ -238,7 +311,7 @@ def main() -> None:
                 parser.error("--expected-digest is required for an exact approved artifact")
             result = notarize(app, args.expected_digest, args.receipt_dir.expanduser().resolve())
         else:
-            result = sign(app, args.mode) if args.action == "sign" else verify(app, args.mode)
+            result = sign(app, args.mode) if args.action == "sign" else verify(app, args.mode, args.standalone_mcpb)
     print(json.dumps(result, sort_keys=True))
 
 

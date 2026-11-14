@@ -4,6 +4,7 @@ import json
 import pathlib
 import shutil
 import subprocess
+import sys
 import tempfile
 import zipfile
 
@@ -19,6 +20,11 @@ def main():
         launcher = pathlib.Path(folder) / "d-bond-launcher"
         subprocess.run(["xcrun", "clang", "-O2", "-Wall", "-Wextra", "-arch", "arm64", "-arch", "x86_64",
                         "-mmacosx-version-min=11.0", str(HERE / "server/launcher.c"), "-o", str(launcher)], check=True)
+        # Sign the universal launcher before archiving. Outer app signing cannot
+        # reach code stored inside an MCPB ZIP. The same archive is embedded and
+        # distributed independently, with DBOND_SIGNING_MODE inherited normally.
+        subprocess.run([sys.executable, str(ROOT / "scripts/release_sign.py"),
+                        "sign-binary", "--binary", str(launcher)], check=True, stdout=subprocess.DEVNULL)
         with zipfile.ZipFile(OUTPUT, "w", zipfile.ZIP_DEFLATED) as bundle:
             for name, src in [("manifest.json", HERE / "manifest.json"),
                               ("LICENSE", ROOT / "LICENSE"),

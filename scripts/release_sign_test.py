@@ -4,6 +4,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+import zipfile
 from unittest.mock import patch
 import release_sign
 
@@ -61,6 +62,49 @@ class NotarizationBoundaryTests(unittest.TestCase):
             (app / "alias").unlink()
             (app / "alias").symlink_to("other")
             self.assertNotEqual(release_sign.fingerprint(app), linked)
+
+
+class ArchivedSignatureTests(unittest.TestCase):
+    def test_archive_macho_checks_outer_app_team(self):
+        with tempfile.TemporaryDirectory() as temp:
+            archive = Path(temp) / "adapter.mcpb"
+            with zipfile.ZipFile(archive, "w") as bundle:
+                bundle.writestr("server/launcher", b"\xcf\xfa\xed\xfe" + b"binary")
+                bundle.writestr("manifest.json", "{}")
+            with patch.object(release_sign, "signature") as signature:
+                self.assertEqual(release_sign.verify_archive(archive, True, "expected-team"), 1)
+                self.assertEqual(signature.call_args.args[1:], (True, "expected-team"))
+
+    def test_unsigned_archive_binary_fails_release_verification(self):
+        with tempfile.TemporaryDirectory() as temp:
+            archive = Path(temp) / "adapter.mcpb"
+            with zipfile.ZipFile(archive, "w") as bundle:
+                bundle.writestr("server/launcher", b"\xcf\xfa\xed\xfe" + b"unsigned")
+            with patch.object(release_sign, "signature", side_effect=RuntimeError("not signed")):
+                with self.assertRaisesRegex(RuntimeError, "not signed"):
+                    release_sign.verify_archive(archive, True, "expected-team")
+
+    def test_universal_binary_checks_both_slices(self):
+        def tools(args, **kwargs):
+            return subprocess.CompletedProcess(args, 0, "arm64 x86_64\n" if "-archs" in args else "", "")
+        with patch.object(release_sign, "command", side_effect=tools), \
+             patch.object(release_sign, "signature_slice", return_value="team") as signature:
+            release_sign.signature(Path("binary"), True, "team")
+        self.assertEqual([call.args[1] for call in signature.call_args_list], ["arm64", "x86_64"])
+
+    def test_standalone_mcpb_must_match_embedded_bytes(self):
+        with tempfile.TemporaryDirectory() as temp:
+            app = Path(temp) / "test.app"
+            embedded = app / "Contents/Resources/agent-installers/d-bond-claude.mcpb"
+            embedded.parent.mkdir(parents=True)
+            embedded.write_bytes(b"embedded")
+            standalone = Path(temp) / "different.mcpb"
+            standalone.write_bytes(b"standalone")
+            with patch.object(release_sign, "command"), patch.object(release_sign, "signature"), \
+                 patch.object(release_sign, "macho_files", return_value=[]), \
+                 patch.object(release_sign, "verify_archive", return_value=1):
+                with self.assertRaisesRegex(RuntimeError, "Standalone MCPB differs"):
+                    release_sign.verify(app, "developer-id", standalone)
 
 
 if __name__ == "__main__":

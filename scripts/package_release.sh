@@ -36,7 +36,7 @@ cp "$stage/source/LICENSE" "$stage/source/THIRD_PARTY_NOTICES.md" "$stage/archiv
 zip_name="D-Bond-macOS-$arch.zip"
 ditto -c -k --norsrc --noextattr --noqtn "$stage/archive" "$stage/$zip_name"
 ditto -x -k "$stage/$zip_name" "$stage/check"
-python3 "$stage/source/scripts/release_sign.py" verify --app "$stage/check/D-Bond.app"
+python3 "$stage/source/scripts/release_sign.py" verify --app "$stage/check/D-Bond.app" --standalone-mcpb "$stage/source/dist/d-bond-claude.mcpb"
 if [[ "${DBOND_NOTARIZE:-0}" == 1 ]]; then
   xcrun stapler validate "$stage/check/D-Bond.app"
   spctl --assess --type execute "$stage/check/D-Bond.app"
