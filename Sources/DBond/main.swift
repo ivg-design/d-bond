@@ -121,7 +121,7 @@ final class MenuController: NSObject, NSApplicationDelegate {
     @objc private func showConnections() {
         guard let hub else {return}
         if connectionsWindow == nil {
-            connectionsWindow = ConnectionsWindowController(hub:hub, onAdd:{ [weak self] in self?.pairDot() }, onSetup: { [weak self] service in self?.showServiceSetup(service) }, onAgents: { [weak self] in self?.openAgents() }, onLog: { [weak self] in self?.showEventsGuide() }, onBridge: { [weak self] in self?.checkBridgeStatus() }, onDotSetup: { [weak self] in self?.copyDotSetup() })
+            connectionsWindow = ConnectionsWindowController(hub:hub, onAdd:{ [weak self] in self?.pairDot() }, onSetup: { [weak self] service in self?.showServiceSetup(service) }, onAgents: { [weak self] in self?.openAgents() }, onLog: { [weak self] in self?.showEventsGuide() }, onBridge: { [weak self] in self?.checkBridgeStatus() }, onDotSetup: { [weak self] in self?.copyDotSetup() }, onManageDot: { [weak self] in self?.settings.presentDotConnector() })
         }
         connectionsWindow?.showWindow()
     }
@@ -213,7 +213,7 @@ final class MenuController: NSObject, NSApplicationDelegate {
         let sop = OwnerSOP.pairedHeraldNotifications(destination: selected, enabled: allowAlerts.state == .on)
         DispatchQueue.global(qos: .userInitiated).async { [weak self, hub] in
             do {
-                let pairing = try hub.pair(name: name, destination: selected, chromeOrigin: chromeOrigin, sop: sop)
+                let pairing = try hub.pair(name: name, destination: selected, chromeOrigin: chromeOrigin, sop: sop, role: .workflow)
                 DispatchQueue.main.async {
                     self?.showPairing(pairing, name: name, preset: selectedPreset)
                     self?.refreshMenu()

@@ -75,7 +75,17 @@ The native Dot subscription and its account grant are separate from your service
 
 ## Service icons and settings
 
-The menu shows how many connections exist and how many have an open listener. Open **Connections** to manage them. **Connectors…** checks which client adapters are already installed; **Add Connection** pairs an HTTP service. Each row keeps its setup, rules, activity, pause and delete controls together. Setup shows the address and lets you choose a custom logo. The app resolves Claude and Codex logos from the locally installed apps. Other owner-named services use a neutral system symbol until you choose custom artwork for that connection; no vendor service artwork is bundled.
+The menu shows how many connections exist and how many have an open listener. Open **Connections** to manage them.
+
+| Section | What it contains | Removing or stopping a connection |
+| --- | --- | --- |
+| Dot | The shared Dot connector and any separately paired Dot sessions | **Dot settings…** manages the shared route. Stopping the active built-in connector interrupts every workflow that uses it. Deleting a Dot session pairing requires updating workflows that address that pairing. |
+| Workflow services | Webhook watchers, browser extensions, notifications and other tools | Pause to keep the endpoint and rules. After deletion, create a replacement pairing, restore its rules and update dependent tools with the new address or credential. |
+| Agent sessions | Individual registered Codex and Claude chats | After deletion, register the chat with a fresh alias or register a new chat. Each new pairing has a new address. |
+
+Deleting a pairing also removes its stored messages and receipts. A service that sends events to Dot appears under **Workflow services**. The shared Dot connector has its own settings in **Dot**.
+
+**Connectors…** checks which client adapters are already installed; **Add Connection** pairs an HTTP service. Each row keeps its setup, rules, activity, pause and delete controls together. Setup shows the address and lets you choose a custom logo. The app resolves Claude and Codex logos from the locally installed apps. Other owner-named services use a neutral system symbol until you choose custom artwork for that connection; no vendor service artwork is bundled.
 
 [Direct agent messages](../adapters/direct/README.md) documents the CLI commands, stdio tools, streaming inbox, and which setup steps need an open client session.
 

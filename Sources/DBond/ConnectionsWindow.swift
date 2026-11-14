@@ -6,8 +6,10 @@ import DBondCore
 final class ConnectionsWindowController: NSObject, NSWindowDelegate {
     private let hub: Hub
     private let onAdd: () -> Void
-    private let onAgents, onLog, onBridge, onDotSetup: () -> Void
+    private let onAgents, onLog, onBridge, onDotSetup, onManageDot: () -> Void
     private let onSetup: (ServiceView) -> Void
+    private let dotLinkStatus: @Sendable () -> String
+    private var checkingDot = false
     private var window: NSWindow?
     private var rootView: ConnectionsRootView?
     private var documentView: ConnectionDocumentView?
@@ -15,10 +17,12 @@ final class ConnectionsWindowController: NSObject, NSWindowDelegate {
     private var refreshTimer: Timer?
     private var ruleEditors: [String: RuleEditor] = [:]
 
-    init(hub: Hub, onAdd: @escaping () -> Void, onSetup: @escaping (ServiceView) -> Void, onAgents: @escaping () -> Void, onLog: @escaping () -> Void, onBridge: @escaping () -> Void, onDotSetup: @escaping () -> Void) {
+    init(hub: Hub, onAdd: @escaping () -> Void, onSetup: @escaping (ServiceView) -> Void, onAgents: @escaping () -> Void, onLog: @escaping () -> Void, onBridge: @escaping () -> Void, onDotSetup: @escaping () -> Void, onManageDot: @escaping () -> Void, dotLinkStatus: (@Sendable () -> String)? = nil) {
+        self.dotLinkStatus = dotLinkStatus ?? { hub.dotLinkStatus() }
         self.hub = hub
         self.onAdd = onAdd
         self.onAgents = onAgents; self.onLog = onLog; self.onBridge = onBridge; self.onDotSetup = onDotSetup
+        self.onManageDot = onManageDot
         self.onSetup = onSetup
         super.init()
     }
@@ -33,6 +37,19 @@ final class ConnectionsWindowController: NSObject, NSWindowDelegate {
         refreshTimer?.invalidate()
         refreshTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.refresh() }
+        }
+    }
+
+    func windowDidBecomeKey(_ notification: Notification) {
+        guard !checkingDot else { return }
+        checkingDot = true
+        let check = dotLinkStatus
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let status = check()
+            DispatchQueue.main.async { [weak self] in
+                self?.documentView?.setDotStatus(status)
+                self?.checkingDot = false
+            }
         }
     }
 
@@ -71,14 +88,9 @@ final class ConnectionsWindowController: NSObject, NSWindowDelegate {
         scroll.hasHorizontalScroller = false
         scroll.autohidesScrollers = true
         scroll.borderType = .noBorder
-        let document = ConnectionDocumentView()
+        let document = ConnectionDocumentView(onManageDot: onManageDot)
         scroll.documentView = document
         self.documentView = document
-
-        let empty = NSTextField(wrappingLabelWithString: "No connections yet. Add a connection to create a local endpoint.")
-        empty.font = .systemFont(ofSize: 13)
-        empty.textColor = .secondaryLabelColor
-        empty.alignment = .center
 
         let agents = NSButton(title: "Agent Setup…", target: self, action: #selector(openAgents))
         agents.bezelStyle = .rounded
@@ -90,7 +102,7 @@ final class ConnectionsWindowController: NSObject, NSWindowDelegate {
         for (name, action) in [("Webhook Log…", #selector(openLog)), ("Connection Status…", #selector(openBridge)), ("Copy Dot Setup", #selector(copySetup))] {
             let item = NSMenuItem(title:name,action:action,keyEquivalent:""); item.target=self; more.menu?.addItem(item)
         }
-        let root = ConnectionsRootView(title: title, subtitle: subtitle, addButton: add, agents:agents, more:more, scrollView: scroll, emptyLabel: empty)
+        let root = ConnectionsRootView(title: title, subtitle: subtitle, addButton: add, agents:agents, more:more, scrollView: scroll)
         root.wantsLayer = true
         root.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
         self.rootView = root
@@ -107,7 +119,8 @@ final class ConnectionsWindowController: NSObject, NSWindowDelegate {
         for id in rows.keys.filter({ !liveIDs.contains($0) }) {
             rows.removeValue(forKey: id)?.removeFromSuperview()
         }
-        let orderedRows = services.map { service -> ConnectionRowView in
+        var sections: [ConnectionSection: [ConnectionRowView]] = [:]
+        for service in services {
             let row: ConnectionRowView
             if let existing = rows[service.id] {
                 row = existing
@@ -123,9 +136,9 @@ final class ConnectionsWindowController: NSObject, NSWindowDelegate {
                 rows[service.id] = row
             }
             row.update(service)
-            return row
+            sections[ConnectionSection(service.role), default: []].append(row)
         }
-        documentView.setRows(orderedRows)
+        documentView.setSections(sections)
         rootView.setCounts(services.count, listening: services.filter { !$0.paused && ($0.subscribers + $0.directSubscribers > 0) }.count)
     }
 
@@ -182,13 +195,8 @@ final class ConnectionsWindowController: NSObject, NSWindowDelegate {
 
     private func confirmDelete(_ id: String) {
         guard let service = hub.snapshot().services.first(where: { $0.id == id }) else { return }
-        let alert = Brand.alert()
-        alert.alertStyle = .warning
-        alert.messageText = "Delete \(service.name)?"
-        alert.informativeText = "This revokes its local credential and deletes its queued events and receipts. A delivery already dispatching may still finish."
-        alert.addButton(withTitle: "Delete Connection")
-        alert.addButton(withTitle: "Cancel")
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let alert = ConnectionDeletion.alert(for: service)
+        guard alert.runModal() == .alertSecondButtonReturn else { return }
         do {
             try hub.remove(id: id)
             refresh()
@@ -214,15 +222,13 @@ private final class ConnectionsRootView: NSView {
     private let more: NSPopUpButton
     private let addButton: NSButton
     private let scrollView: NSScrollView
-    private let emptyLabel: NSTextField
 
-    init(title: NSTextField, subtitle: NSTextField, addButton: NSButton, agents:NSButton, more:NSPopUpButton, scrollView: NSScrollView, emptyLabel: NSTextField) {
+    init(title: NSTextField, subtitle: NSTextField, addButton: NSButton, agents:NSButton, more:NSPopUpButton, scrollView: NSScrollView) {
         self.title = title
         self.subtitle = subtitle
         self.addButton = addButton
         self.agents = agents; self.more = more
         self.scrollView = scrollView
-        self.emptyLabel = emptyLabel
         super.init(frame: NSRect(x: 0, y: 0, width: 820, height: 610))
         autoresizingMask = [.width, .height]
         icon.image = Brand.app; icon.imageScaling = .scaleProportionallyUpOrDown; addSubview(icon)
@@ -231,7 +237,6 @@ private final class ConnectionsRootView: NSView {
         addSubview(subtitle)
         addSubview(addButton)
         addSubview(scrollView)
-        addSubview(emptyLabel)
     }
 
     required init?(coder: NSCoder) { nil }
@@ -239,7 +244,6 @@ private final class ConnectionsRootView: NSView {
 
     func setCounts(_ total: Int, listening: Int) {
         subtitle.stringValue = total == 0 ? "Connect a service or an agent to this Mac." : "\(total) paired · \(listening) listening now"
-        emptyLabel.isHidden = total != 0
         needsLayout = true
     }
 
@@ -259,35 +263,140 @@ private final class ConnectionsRootView: NSView {
         let listTop: CGFloat = 121
         let listHeight = max(0, bounds.height - listTop - 20)
         scrollView.frame = NSRect(x: 20, y: listTop, width: max(0, width - 40), height: listHeight)
-        emptyLabel.frame = NSRect(x: 40, y: listTop + max(0, (listHeight - 42) / 2), width: max(0, width - 80), height: 42)
         (scrollView.documentView as? ConnectionDocumentView)?.resizeTo(width: scrollView.contentView.bounds.width, viewportHeight: scrollView.contentView.bounds.height)
+    }
+}
+
+enum ConnectionSection: String, CaseIterable {
+    case dot = "Dot"
+    case workflows = "Workflow services"
+    case agents = "Agent sessions"
+
+    init(_ role: ConnectionRole) {
+        switch role {
+        case .codexSession, .claudeSession: self = .agents
+        case .dotSession: self = .dot
+        case .workflow: self = .workflows
+        }
+    }
+}
+
+@MainActor
+enum ConnectionDeletion {
+    static func alert(for service: ServiceView) -> NSAlert {
+        let alert = Brand.alert()
+        alert.alertStyle = .warning
+        alert.messageText = "Delete " + service.name + "?"
+        let consequence: String
+        let action: String
+        switch ConnectionSection(service.role) {
+        case .agents:
+            action = "Delete Registration"
+            consequence = "This chat will stop receiving D-Bond messages. To reconnect, register it with a fresh alias, or register a new chat."
+        case .dot:
+            action = "Delete Dot Pairing"
+            consequence = "Workflows that address this Dot pairing will lose their route. To restore it, pair Dot again and update each workflow with its new address."
+        case .workflows:
+            action = "Delete Workflow Connection"
+            consequence = "Tools that use this connection will stop exchanging messages. To reconnect, create a new pairing, re-enter its rules and update the tools with its new address or credential."
+        }
+        var details = "D-Bond revokes this credential and deletes this pairing’s rules, messages and receipts."
+        if service.queued > 0 { details += " Queued events to remove: " + String(service.queued) + "." }
+        if service.inFlight > 0 { details += " A delivery already in progress may finish." }
+        if !service.paused { details += " Use Pause to keep the pairing for later." }
+        alert.informativeText = consequence + "\n\n" + details
+        alert.addButton(withTitle: "Cancel")
+        let delete = alert.addButton(withTitle: action)
+        delete.hasDestructiveAction = true
+        delete.keyEquivalent = ""
+        return alert
     }
 }
 
 @MainActor
 private final class ConnectionDocumentView: NSView {
-    private var rows: [ConnectionRowView] = []
-    private let rowHeight: CGFloat = 92
-    private let rowGap: CGFloat = 6
+    private var sections: [ConnectionSection: [ConnectionRowView]] = [:]
+    private var headings: [ConnectionSection: NSTextField] = [:]
+    private var emptyLabels: [ConnectionSection: NSTextField] = [:]
+    private let connector = NSButton(title: "Dot settings…", target: nil, action: nil)
+    private let connectorLabel = NSTextField(labelWithString: "Shared connector for all Dot traffic")
+    private let onManageDot: () -> Void
+
+    init(onManageDot: @escaping () -> Void) {
+        self.onManageDot = onManageDot
+        super.init(frame: .zero)
+        for section in ConnectionSection.allCases {
+            let heading = NSTextField(labelWithString: section.rawValue)
+            heading.font = .systemFont(ofSize: 16, weight: .semibold)
+            heading.setAccessibilityRole(.staticText)
+            headings[section] = heading
+            addSubview(heading)
+            if section != .dot {
+                let text = section == .agents ? "No Claude or Codex sessions registered." : "No workflow services paired."
+                let label = NSTextField(labelWithString: text)
+                label.textColor = .secondaryLabelColor
+                emptyLabels[section] = label
+                addSubview(label)
+            }
+        }
+        connector.target = self
+        connector.action = #selector(manageDot)
+        connector.bezelStyle = .rounded
+        connector.setAccessibilityLabel("Manage shared Dot connector")
+        connectorLabel.textColor = .secondaryLabelColor
+        connectorLabel.lineBreakMode = .byTruncatingTail
+        addSubview(connectorLabel)
+        addSubview(connector)
+    }
+
+    required init?(coder: NSCoder) { nil }
     override var isFlipped: Bool { true }
 
-    func setRows(_ rows: [ConnectionRowView]) {
-        for old in self.rows where !rows.contains(where: { $0 === old }) { old.removeFromSuperview() }
-        self.rows = rows
-        for row in rows where row.superview !== self { addSubview(row) }
+    @objc private func manageDot() { onManageDot() }
+
+    func setDotStatus(_ status: String) {
+        connectorLabel.stringValue = status
+        connectorLabel.toolTip = status
+    }
+
+    func setSections(_ sections: [ConnectionSection: [ConnectionRowView]]) {
+        self.sections = sections
+        for rows in sections.values {
+            for row in rows where row.superview !== self { addSubview(row) }
+        }
         if let scroll = enclosingScrollView {
             resizeTo(width: scroll.contentView.bounds.width, viewportHeight: scroll.contentView.bounds.height)
         }
     }
 
     func resizeTo(width: CGFloat, viewportHeight: CGFloat) {
-        let rowsHeight = rows.isEmpty ? 0 : CGFloat(rows.count) * rowHeight + CGFloat(rows.count - 1) * rowGap
-        let height = max(viewportHeight, rowsHeight)
-        frame = NSRect(x: 0, y: 0, width: max(0, width), height: height)
-        for (index, row) in rows.enumerated() {
-            row.frame = NSRect(x: 0, y: CGFloat(index) * (rowHeight + rowGap), width: max(0, width), height: rowHeight)
-            row.layoutContent()
+        let width = max(0, width)
+        var top: CGFloat = 0
+        for section in ConnectionSection.allCases {
+            headings[section]?.frame = NSRect(x: 0, y: top, width: width, height: 22)
+            top += 28
+            if section == .dot {
+                let buttonWidth = connector.fittingSize.width
+                connector.frame = NSRect(x: max(0, width - buttonWidth), y: top - 2, width: buttonWidth, height: 26)
+                connectorLabel.frame = NSRect(x: 1, y: top + 3, width: max(0, width - buttonWidth - 12), height: 18)
+                top += 30
+            }
+            let rows = sections[section, default: []]
+            if let label = emptyLabels[section] {
+                label.isHidden = !rows.isEmpty
+                if rows.isEmpty {
+                    label.frame = NSRect(x: 1, y: top, width: width, height: 20)
+                    top += 20
+                }
+            }
+            for row in rows {
+                row.frame = NSRect(x: 0, y: top, width: width, height: 84)
+                row.layoutContent()
+                top += 90
+            }
+            top += 14
         }
+        frame = NSRect(x: 0, y: 0, width: width, height: max(viewportHeight, top))
     }
 }
 

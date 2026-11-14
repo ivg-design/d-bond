@@ -288,6 +288,15 @@ final class SettingsWindowController: NSWindowController {
     }
 
     @objc private func stopConnector() {
+        if connector.selectedRoute == "owned" {
+            let message = Brand.alert()
+            message.alertStyle = .warning
+            message.messageText = "Stop the shared Dot connector?"
+            message.informativeText = "This stops the built-in route for all Dot workflows and turns off its automatic start. To resume delivery, return to Settings, choose Start and check the Dot subscription."
+            message.addButton(withTitle: "Cancel")
+            message.addButton(withTitle: "Stop Connector")
+            guard message.runModal() == .alertSecondButtonReturn else { return }
+        }
         busy(true)
         connector.stop { [weak self] in self?.completed($0, refreshRoute: true) }
     }

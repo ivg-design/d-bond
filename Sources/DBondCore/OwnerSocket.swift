@@ -47,18 +47,20 @@ public final class OwnerSocket {
                     func output(_ value:[String:Any]) throws -> Data { try JSONSerialization.data(withJSONObject:value,options:[.sortedKeys]) }
                     switch op {
                     case "pair":
-                        guard let name=obj["name"] as? String, Set(obj.keys).isSubset(of:["op","name","sop","chromeOrigin","destination"]),
+                        guard let name=obj["name"] as? String, Set(obj.keys).isSubset(of:["op","name","sop","chromeOrigin","destination","role"]),
                               obj["chromeOrigin"] == nil || obj["chromeOrigin"] is String else {throw Fault.message("Invalid pairing request.")}
+                        let role = (obj["role"] as? String).flatMap(ConnectionRole.init(rawValue:))
+                        guard obj["role"] == nil || role != nil else { throw Fault.message("Unknown pairing role.") }
                         let destination=obj["destination"] as? String ?? "dot"
                         guard ["dot","peer","herald"].contains(destination) else { throw Fault.message("Invalid pairing destination.") }
-                        reply=try JSONEncoder().encode(hub.pair(name:name,destination:destination,chromeOrigin:obj["chromeOrigin"] as? String,sop:try sop(obj["sop"])))
+                        reply=try JSONEncoder().encode(hub.pair(name:name,destination:destination,chromeOrigin:obj["chromeOrigin"] as? String,sop:try sop(obj["sop"]),role:role))
                     case "rename":
                         guard Set(obj.keys)==["op","id","name"],let id=obj["id"] as? String,let name=obj["name"] as? String else {throw Fault.message("Invalid rename request.")}
                         try hub.rename(id:id,name:name);reply=Data(#"{"renamed":true}"#.utf8)
                     case "list":
                         guard Set(obj.keys)==["op"] else {throw Fault.message("Invalid list request.")}
                         let rows=hub.snapshot().services.map { row -> [String:Any] in
-                            ["id":row.id,"name":row.name,"destination":row.destination,"paused":row.paused,"sopVersion":row.sop?.version ?? 0,"directSubscribers":row.directSubscribers,"subscribers":row.subscribers,"wakeState":row.wakeState,"lastVerifiedAt":row.lastVerifiedAt as Any? ?? NSNull()]
+                            ["id":row.id,"name":row.name,"destination":row.destination,"role":row.role.rawValue,"paused":row.paused,"sopVersion":row.sop?.version ?? 0,"directSubscribers":row.directSubscribers,"subscribers":row.subscribers,"wakeState":row.wakeState,"lastVerifiedAt":row.lastVerifiedAt as Any? ?? NSNull()]
                         }
                         reply=try output(["services":rows])
                     case "get_sop":

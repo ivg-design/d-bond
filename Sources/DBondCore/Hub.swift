@@ -41,9 +41,9 @@ public struct BrokerEventSummary {
     }
 }
 public struct Pairing: Codable { public let id,secret,endpoint,destination: String; public let herald:Bool; public let chromeOrigin:String? }
-public struct ServiceView { public let id,name,endpoint,destination: String; public let lastSeen,lastState,chromeOrigin: String?; public let herald,paused:Bool; public let queued,inFlight,subscribers,directSubscribers:Int; public let sop:OwnerSOP?; public let wakeState:String; public let lastVerifiedAt:String? }
+public struct ServiceView { public let id,name,endpoint,destination: String; public let lastSeen,lastState,chromeOrigin: String?; public let herald,paused:Bool; public let queued,inFlight,subscribers,directSubscribers:Int; public let sop:OwnerSOP?; public let wakeState:String; public let lastVerifiedAt:String?; public let role:ConnectionRole }
 public struct Snapshot { public let endpoint: String; public let services:[ServiceView]; public let eventCount:Int }
-struct Service: Codable, Equatable { var id,name,digest:String; var seen,state:String?; var herald,paused:Bool?; var destination,chromeOrigin:String?; var sop:OwnerSOP? = nil }
+struct Service: Codable, Equatable { var id,name,digest:String; var seen,state:String?; var herald,paused:Bool?; var destination,chromeOrigin:String?; var sop:OwnerSOP? = nil; var role:String? = nil }
 struct HeraldRecipientPolicy: Codable, Equatable {
     let recipient: String
     let version: Int
@@ -229,7 +229,7 @@ public final class Hub: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         return Snapshot(endpoint:base,services:ledger.services.map { service in
             let events = ledger.events.filter { $0.service == service.id }
-            return ServiceView(id:service.id,name:service.name,endpoint:endpoint(service.id),destination:service.destination ?? (service.herald == true ? "herald" : "demo"),lastSeen:service.seen,lastState:service.state,chromeOrigin:service.chromeOrigin,herald:service.herald == true,paused:service.paused == true,queued:events.filter { $0.state == "queued" }.count,inFlight:events.filter { ["dispatching","sending_banner"].contains($0.state) }.count,subscribers:subscribers[service.id] ?? 0,directSubscribers:directSubscribers[service.id] ?? 0,sop:service.sop,wakeState:wakeState(for:service.id),lastVerifiedAt:lastVerifiedAt(for:service.id))
+            return ServiceView(id:service.id,name:service.name,endpoint:endpoint(service.id),destination:service.destination ?? (service.herald == true ? "herald" : "demo"),lastSeen:service.seen,lastState:service.state,chromeOrigin:service.chromeOrigin,herald:service.herald == true,paused:service.paused == true,queued:events.filter { $0.state == "queued" }.count,inFlight:events.filter { ["dispatching","sending_banner"].contains($0.state) }.count,subscribers:subscribers[service.id] ?? 0,directSubscribers:directSubscribers[service.id] ?? 0,sop:service.sop,wakeState:wakeState(for:service.id),lastVerifiedAt:lastVerifiedAt(for:service.id),role:service.connectionRole)
         },eventCount:ledger.events.count)
     }
     public func dotLinkStatus() -> String { nativeStatus() }
@@ -396,7 +396,7 @@ public final class Hub: @unchecked Sendable {
         guard heraldSupport != nil else { throw Fault.message("Native push injection requires a Herald fixture.") }
         guard recordDotPush(service:service,sourceID:sourceID,detail:text) else { throw Fault.message("Could not persist fixture push.") }
     }
-    public func pair(name:String, herald:Bool = false, destination:String = "dot", chromeOrigin:String? = nil, sop:OwnerSOP? = nil) throws -> Pairing {
+    public func pair(name:String, herald:Bool = false, destination:String = "dot", chromeOrigin:String? = nil, sop:OwnerSOP? = nil, role:ConnectionRole? = nil) throws -> Pairing {
         try Self.validate(sop)
         let name = name.trimmingCharacters(in:.whitespacesAndNewlines)
         guard !name.isEmpty, name.count <= 200, !name.unicodeScalars.contains(where:CharacterSet.controlCharacters.contains) else { throw Fault.message("Enter a name between 1 and 200 printable characters.") }
@@ -410,12 +410,16 @@ public final class Hub: @unchecked Sendable {
                 throw Fault.message("Chrome extension origin must be chrome-extension:// followed by a 32-character extension ID (a–p).")
             }
         }
+        let connectionRole = role ?? ConnectionRole.legacy(name: name, destination: mode, chromeOrigin: chromeOrigin)
+        guard connectionRole == .workflow || (["dot", "peer"].contains(mode) && chromeOrigin == nil) else {
+            throw Fault.message("A session pairing requires a Dot or direct route without a browser origin.")
+        }
         let id = UUID().uuidString.lowercased()
         let secret = SymmetricKey(size:.bits256).withUnsafeBytes { Data($0).base64EncodedString() }
         lock.lock(); defer { lock.unlock() }
         guard ledger.services.count < 64 else { throw Fault.message("Prototype pairing limit reached.") }
         guard !ledger.services.contains(where: { $0.name.localizedCaseInsensitiveCompare(name) == .orderedSame }) else { throw Fault.message("A service connection already uses that name.") }
-        var next = ledger; next.services.append(Service(id:id,name:name,digest:Self.digest(Data(secret.utf8)),herald:mode == "herald",paused:false,destination:mode,chromeOrigin:chromeOrigin,sop:sop))
+        var next = ledger; next.services.append(Service(id:id,name:name,digest:Self.digest(Data(secret.utf8)),herald:mode == "herald",paused:false,destination:mode,chromeOrigin:chromeOrigin,sop:sop,role:connectionRole.rawValue))
         try persist(next); return Pairing(id:id,secret:secret,endpoint:endpoint(id),destination:mode,herald:mode == "herald",chromeOrigin:chromeOrigin)
     }
     public func getSOP(service:String) throws -> OwnerSOP? {
@@ -551,7 +555,9 @@ public final class Hub: @unchecked Sendable {
         guard !name.isEmpty, name.count<=200, !name.unicodeScalars.contains(where:CharacterSet.controlCharacters.contains) else { throw Fault.message("Invalid display name.") }
         lock.lock(); defer {lock.unlock()}
         guard let index=ledger.services.firstIndex(where:{$0.id==id}), !ledger.services.contains(where:{$0.id != id && $0.name.localizedCaseInsensitiveCompare(name) == .orderedSame}) else {throw Fault.message("Unknown service or duplicate name.")}
-        var next=ledger; next.services[index].name=name; try persist(next); lock.broadcast()
+        var next=ledger
+        next.services[index].role = ledger.services[index].connectionRole.rawValue
+        next.services[index].name=name; try persist(next); lock.broadcast()
     }
     public func setPaused(id:String, paused:Bool) throws {
         lock.lock(); defer { lock.unlock() }

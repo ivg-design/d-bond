@@ -7,12 +7,10 @@ enum AgentSessionKind {
     case claude, codex
 
     init?(service: ServiceView) {
-        guard service.destination == "peer" || service.destination == "dot" else { return nil }
-        let prefix = service.name.components(separatedBy: " / ").first?.lowercased()
-        switch prefix {
-        case "claude": self = .claude
-        case "codex": self = .codex
-        default: return nil
+        switch service.role {
+        case .claudeSession: self = .claude
+        case .codexSession: self = .codex
+        case .dotSession, .workflow: return nil
         }
     }
 }

@@ -16,4 +16,4 @@ swiftc -parse-as-library -I "$products" \
   "$root/Sources/DBond/ConnectionsWindow.swift" \
   "$root/scripts/fixtures/session_connection_guide/main.swift" \
   "$products/DBondCore.o" -o "$scratch/session-guide-fixture"
-"$scratch/session-guide-fixture" "$scratch"
+DBOND_FIXTURE_ICON="$root/Assets/d-bond-app-icon.png" "$scratch/session-guide-fixture" "$scratch"
