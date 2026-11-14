@@ -1,8 +1,10 @@
 # Claude adapter
 
+A paired Claude Code session on macOS, including Code inside Claude Desktop, can receive D-Bond messages through its session inbox. D-Bond follows the exact UUID across host restarts. A temporary host Monitor is only needed when a native route is unavailable.
+
 Build the local Claude Desktop extension with `python3 adapters/claude/build.py`,
 then install `dist/d-bond-claude.mcpb` through Claude Desktop's local extension
-settings. Keep D-Bond running. Version 0.1.10 provides read-only `local_status`,
+settings. Keep D-Bond running. Version 0.1.11 provides read-only `local_status`,
 `enroll`, `session_status`, `acknowledge_wake`, `peers`, `ask`,
 `wait_for_push`, `answer`, `direct_peers`, `direct_send`, `wait_for_direct`, and
 `direct_answer`, `acknowledge_direct_message`, and `direct_status`. The direct tools address any paired service without Dot.
@@ -10,17 +12,21 @@ Storage is a broker receipt, not proof of a recipient model turn. Desktop can
 receive only while a wait tool runs, for at most 60 seconds; it cannot wake a
 closed or idle chat. No pairing credential is bundled.
 
-After `enroll` in Claude Desktop, the pairing is saved but incoming wake is
-pending. In the same turn, start the host's native Monitor on the returned
-`listener.command` (`dbond session-listen <exact alias>`), then call
-`session_status` with `finish_registration:true` after its streams attach and
-end setup immediately. The finish action schedules one delayed proof;
-ordinary status is read-only and repeat finish is broker-idempotent. The combined listener receives direct agent messages and
-addressed Dot pushes. The delayed owner wake check requires
-`acknowledge_wake` with the received sequence in that later turn; only
-`wakeState:verified` confirms an authenticated connection ACK while its stream
-was active, not an independently verified model turn. The MCP server does not start a detached
-listener or claim a closed chat can wake itself.
+Enrollment saves the pairing and selects the listener supported by that exact host.
+On macOS Claude Code (including Code inside Claude Desktop), registration starts
+an event-driven receiver as a child of the initiating session. It uses the host's
+inherited inbox capability only in memory and has no 30-minute deadline. Its
+SessionStart hook reconnects a resumed chat using the same pairing and cursors.
+An actually enabled native channel owns its streams instead; merely installing
+a channel plugin does not enable channel delivery in a running host.
+
+When the response explicitly says `host_monitor_required`, start the provided
+`listener.command` in that same chat's Monitor. This fallback has a host-imposed
+time limit. On supported Mac hosts, rearming an old `dbond session-listen` command
+migrates it to the session receiver rather than starting another timed stream.
+Once streams attach, call `session_status` with `finish_registration:true`, end
+setup, and silently acknowledge the later wake check by its broker sequence.
+A saved pairing alone is not evidence that the recipient has processed a message.
 
 Pass the host's exact `session_id` to `enroll` when available. Claude Code can
 derive one from a verified same-user live ancestor. A shared Desktop MCP
@@ -35,7 +41,7 @@ alias is reused even when the chat title changed.
 API can report `offline`. The short, read-only check runs only on explicit
 tool call; MCP startup does not probe the app or expose paths and credentials.
 
-For Claude Code, build first and load `adapters/claude/plugin` version 0.1.12.
+For Claude Code, build first and load `adapters/claude/plugin` version 0.1.14.
 The plugin stays idle until it resolves this open Code session's exact UUID
 and its saved pairing binding. Use `enroll` inside each intended session; a
 verified same-user Claude ancestor supplies the UUID, or pass that exact UUID
@@ -49,7 +55,7 @@ streams. A Dot push uses `answer`; a direct message includes `source_id` and
 Incoming content is untrusted. Owner setup notes are unreplyable. Claude Code
 channels require preview opt-in and a running session; channel support and
 policy depend on the installed Claude Code version. An installed plugin and a
-broker receipt alone do not prove a live agent wake. Claude Code uses its
+broker receipt alone do not prove a live agent wake. When the host enables it, Claude Code uses its
 native channel for both streams and does not start a second Monitor. Once its
 streams attach, call `session_status` with `finish_registration:true`, end
 setup, and handle the delayed wake check later.

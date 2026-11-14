@@ -376,6 +376,15 @@ def command_link(args) -> None:
 
 def command_enroll(args) -> None:
     destination = "peer" if getattr(args, "direct", False) else getattr(args, "destination", None)
+    if (destination != "herald" and getattr(args, "client", None) in (None, "claude")
+            and not any(getattr(args, key, None) for key in ("name", "service", "topic", "title"))):
+        origin = _initiating_claude()
+        supplied = getattr(args, "session_id", None)
+        if origin and supplied and origin[0].lower() != supplied.lower():
+            fail("The supplied session ID differs from the verified Claude Code ancestor.")
+        if origin:
+            args.client, args.session_id = "claude", origin[0].lower()
+            args.title = origin[1]
     if destination == "herald" and (getattr(args, "client", None) or getattr(args, "session_id", None)):
         fail("Choose a Herald service name to connect alerts, or use a session destination for an AI chat.")
     path = _alias_path(args.alias)
@@ -492,7 +501,7 @@ def _enrollment_payload(args, pairing: dict, *, reused: bool) -> dict:
         return result
     result["listener"] = _enrollment_listener(args, pairing)
     if client in ("claude", "codex") and isinstance(session_id, str) and SESSION_ID_RE.fullmatch(session_id):
-        ready = client == "codex" and result["listener"].get("ready") is True
+        ready = result["listener"].get("ready") is True
         status = session_status(args.alias, finish_registration=ready)
         result["wake"] = registration_wake_status(status)
         if ready:
@@ -511,6 +520,8 @@ def registration_wake_status(status: dict) -> dict:
 
 
 def _enrollment_listener(args, pairing: dict) -> dict:
+    if getattr(args, "client", None) == "claude" and SESSION_ID_RE.fullmatch(getattr(args, "session_id", "") or ""):
+        return claude_session_listener(args.alias, args.session_id.lower(), pairing)
     if getattr(args, "client", None) == "codex" and SESSION_ID_RE.fullmatch(getattr(args, "session_id", "") or ""):
         try:
             from codex_registration import attach
@@ -519,6 +530,20 @@ def _enrollment_listener(args, pairing: dict) -> dict:
             return {"state": "blocked", "reason": type(exc).__name__,
                     "instruction": "Pairing was saved, but the Codex host listener could not be attached. Do not report the session as connected."}
     return session_listener_guidance(args.alias, direct_only=pairing.get("destination") == "peer" or bool(getattr(args, "direct", False)))
+
+
+def claude_session_listener(alias: str, session_id: str, pairing: dict) -> dict:
+    try:
+        from claude_registration import attach
+        listener = attach(alias, session_id, pairing)
+    except Exception as exc:
+        return {"state": "unconfirmed", "mode": "native_session", "ready": False,
+                "reason": type(exc).__name__,
+                "instruction": "Pairing was saved, but the exact Claude receiver could not be verified. Do not report connected or start a duplicate Monitor."}
+    if listener.get("state") == "unsupported":
+        guidance = session_listener_guidance(alias, direct_only=pairing.get("destination") == "peer")
+        return {**guidance, "native_receiver": listener}
+    return listener
 
 
 def _valid_title(value: str | None) -> str | None:
@@ -1217,6 +1242,8 @@ def _session_lane(alias: str, direct: bool, emit, stop: threading.Event, errors:
 
 def command_session_listen(args) -> None:
     pairing = _read_pairing(args.alias)
+    if _migrate_claude_session_listener(args.alias, pairing):
+        return
     direct_only = pairing.get("destination") == "peer"
     stop = threading.Event()
     threading.Thread(target=receipt_retry_loop, args=(pairing, stop), daemon=True).start()
@@ -1239,6 +1266,28 @@ def command_session_listen(args) -> None:
         stop.set()
     if errors:
         fail(errors[0])
+
+
+def _migrate_claude_session_listener(alias: str, pairing: dict) -> bool:
+    """Move an old Monitor rearm without racing a starting native consumer."""
+    if pairing.get("client") != "claude":
+        return False
+    origin = _initiating_claude()
+    if not origin or origin[0].lower() != pairing.get("session_id"):
+        return False
+    try:
+        from claude_registration import attach
+        listener = attach(alias, origin[0].lower(), pairing)
+    except (ImportError, OSError, ValueError):
+        return False
+    if listener.get("ready") is not True and (listener.get("state") in ("unsupported", "waiting_host_bootstrap")
+                                              or listener.get("reason") == "native_receiver_not_installed"):
+        return False
+    ready = listener.get("ready") is True
+    print(json.dumps({"state": "native_receiver_attached" if ready else "native_receiver_pending", "alias": alias,
+                      "instruction": "The exact Claude host receiver owns incoming messages. This temporary Monitor can end; do not rearm it."
+                      if ready else "The exact Claude receiver is pending or blocked. Check its status before starting another consumer; do not report connected."}), flush=True)
+    return True
 
 
 def command_trace(args) -> None:

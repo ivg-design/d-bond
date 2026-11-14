@@ -16,7 +16,7 @@ def main():
         raise ValueError("Codex plugin manifests disagree about the version")
     server = PLUGIN / "server"
     shutil.copy2(ROOT / "adapters/direct/server/mcp.py", server / "direct.py")
-    for module in ("owner.py", "dbond.py", "wake_registration.py", "codex_registration.py"):
+    for module in ("owner.py", "dbond.py", "wake_registration.py", "codex_registration.py", "claude_registration.py"):
         shutil.copy2(ROOT / "adapters/cli" / module, server / module)
     (PLUGIN / "server/launch.sh").chmod(0o755)
     print(PLUGIN)

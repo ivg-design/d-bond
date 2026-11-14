@@ -16,6 +16,10 @@ def response(value):
 
 
 class SessionHookTests(unittest.TestCase):
+    def setUp(self):
+        self.attach = patch("session_start._attach", return_value={"state": "unsupported"}).start()
+        self.addCleanup(patch.stopall)
+
     def call(self, event=EVENT):
         return context(event, dbond_script="/fixture/dbond.py")
 
@@ -53,6 +57,26 @@ class SessionHookTests(unittest.TestCase):
         run.side_effect = [response({"alias": ALIAS, "service_id": SERVICE}),
                            response({"alias": ALIAS, "service_id": SESSION,"state": "pending_listener"})]
         self.assertIsNone(self.call())
+
+    @patch("session_start.subprocess.run")
+    def test_exact_native_receiver_restores_without_monitor(self, run):
+        run.side_effect = [response({"alias": ALIAS, "service_id": SERVICE}),
+                           response({"alias": ALIAS, "service_id": SERVICE, "state": "pending_listener"})]
+        self.attach.return_value = {"state": "listening", "ready": True}
+        result = self.call()["hookSpecificOutput"]["additionalContext"]
+        self.attach.assert_called_once_with(ALIAS, SESSION, "/fixture/dbond.py")
+        self.assertIn("restored this exact paired Claude host receiver", result)
+        self.assertIn("Do not start a timed Monitor", result)
+        self.assertIn("no additional human grant", result)
+
+    @patch("session_start.subprocess.run")
+    def test_held_receiver_never_requests_monitor_fallback(self, run):
+        run.side_effect = [response({"alias": ALIAS, "service_id": SERVICE}),
+                           response({"alias": ALIAS, "service_id": SERVICE, "state": "pending_listener"})]
+        self.attach.return_value = {"state": "held", "ready": False}
+        result = self.call()["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("not ready", result)
+        self.assertNotIn("session-listen", result)
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 {
   "name": "d-bond",
-  "version": "0.1.12",
+  "version": "0.1.14",
   "description": "Receive Dot and direct D-Bond messages in an open Claude Code session and reply through the same pairing",
   "author": {
     "name": "IVG"

@@ -8,6 +8,10 @@ import tempfile
 import threading
 import time
 import unittest
+import contextlib
+import io
+import types
+from unittest.mock import patch
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -71,6 +75,40 @@ class MonitorFixture:
 
 
 class SessionListenTests(unittest.TestCase):
+    def test_exact_monitor_rearm_uses_ready_native_receiver(self):
+        sid = "11111111-2222-3333-4444-555555555555"
+        pair = {"client": "claude", "session_id": sid}
+        attach = unittest.mock.Mock(return_value={"ready": True})
+        with patch.object(dbond, "_read_pairing", return_value=pair), \
+             patch.object(dbond, "_initiating_claude", return_value=(sid, "Title")), \
+             patch.dict(sys.modules, {"claude_registration": types.SimpleNamespace(attach=attach)}), \
+             patch.object(dbond.threading, "Thread") as thread, contextlib.redirect_stdout(io.StringIO()) as output:
+            dbond.command_session_listen(types.SimpleNamespace(alias="review"))
+        attach.assert_called_once_with("review", sid, pair)
+        thread.assert_not_called()
+        self.assertEqual(json.loads(output.getvalue())["state"], "native_receiver_attached")
+
+    def test_other_or_unavailable_host_preserves_monitor_fallback(self):
+        sid = "11111111-2222-3333-4444-555555555555"
+        pair = {"client": "claude", "session_id": sid}
+        attach = unittest.mock.Mock(return_value={"ready": False, "state": "waiting_host_bootstrap"})
+        with patch.dict(sys.modules, {"claude_registration": types.SimpleNamespace(attach=attach)}), \
+             patch.object(dbond, "_initiating_claude", return_value=(sid, "Title")):
+            self.assertFalse(dbond._migrate_claude_session_listener("review", pair))
+        with patch.dict(sys.modules, {"claude_registration": types.SimpleNamespace(attach=attach)}), \
+             patch.object(dbond, "_initiating_claude", return_value=("66666666-2222-3333-4444-555555555555", "Other")):
+            attach.reset_mock()
+            self.assertFalse(dbond._migrate_claude_session_listener("review", pair))
+            attach.assert_not_called()
+
+    def test_native_worker_startup_does_not_race_an_old_monitor(self):
+        sid = "11111111-2222-3333-4444-555555555555"
+        with patch.dict(sys.modules, {"claude_registration": types.SimpleNamespace(attach=lambda *a: {"state": "starting", "ready": False})}), \
+             patch.object(dbond, "_initiating_claude", return_value=(sid, "Title")), \
+             contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertTrue(dbond._migrate_claude_session_listener("review", {"client": "claude", "session_id": sid}))
+        self.assertEqual(json.loads(output.getvalue())["state"], "native_receiver_pending")
+
     def test_combined_stream_and_replay_after_absence(self):
         fixture = MonitorFixture()
         try:

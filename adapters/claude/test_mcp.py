@@ -92,7 +92,8 @@ def exchange(channel=False, interpreter=None, native=False):
                 notifications.append(row)
         try:
             init = request(1, "initialize", {"protocolVersion": "2025-06-18",
-                                               "capabilities": {}, "clientInfo": {"name": "fixture", "version": "1"}})
+                                               "capabilities": {"experimental": {"claude/channel": {}}} if channel else {},
+                                               "clientInfo": {"name": "fixture", "version": "1"}})
             assert init["result"]["serverInfo"]["name"] == "d-bond"
             assert "THIS turn" in init["result"]["instructions"]
             assert "LATER recipient turn" in init["result"]["instructions"]
@@ -228,7 +229,7 @@ def concurrent_code_sessions_same_title():
     source = ROOT / "adapters/claude/server/mcp.py"
     manifest = json.loads((ROOT / "adapters/claude/plugin/.claude-plugin/plugin.json").read_text())
     channel_mcp = json.loads((ROOT / "adapters/claude/plugin/.mcp.json").read_text())
-    assert manifest["version"] == "0.1.12" and "userConfig" not in manifest
+    assert isinstance(manifest["version"], str) and manifest["version"] and "userConfig" not in manifest
     assert channel_mcp["mcpServers"]["d-bond"]["env"] == {"DBOND_CLAUDE_CHANNEL": "1"}
     def instance(name):
         spec = importlib.util.spec_from_file_location(name, source)

@@ -1,44 +1,9 @@
-# Claude Code session listener reminder
+# Restore a Claude session listener
 
-The Claude Code plugin registers `hooks/hooks.json` as a `SessionStart` hook.
-Its bundled script checks the host-provided `session_id` through the
-owner-private `dbond session-binding SESSION_ID --client claude` lookup. It
-continues only when there is one exact Claude binding and `dbond session-status
-ALIAS` confirms the same service ID with `pending_listener`. Unrelated chats,
-ambiguous bindings, active listeners, paused pairings and unavailable status
-produce no output. No credentials or message bodies enter hook context.
+The D-Bond Claude Code plugin runs its SessionStart hook on startup and resume. It checks the exact Claude session UUID and its saved D-Bond pairing. On a supported Mac session, the receiver uses the chat's native inbox for direct messages and addressed Dot pushes. Resuming the chat reuses its pairing and cursors. A host that admitted the native Claude channel can receive messages through that channel.
 
-For that exact session, the hook tells Claude on its **next actual turn** to
-use its built-in Monitor on `dbond session-listen ALIAS` with a 30-minute
-timeout, then verify `dbond session-status ALIAS` reports
-`subscriber_present`. When Monitor exits, the active host must recheck and
-re-arm it. Stream presence is not proof that the agent read or answered a
-message. Separately reported wake verification is evidence of an authenticated
-host turn, not proof of unsolicited idle-chat wake.
+An unpaired chat needs no listener. If neither native route is available, Claude can use its built-in Monitor to run the command returned by registration. That watch has a host deadline. A closed Claude session must reopen before it can process messages.
 
-Packaging must include:
+The standalone Claude Desktop extension provides callable tools. It does not install Claude Code hooks.
 
-- `adapters/claude/plugin/hooks/hooks.json`
-- `adapters/claude/session-hooks/session_start.py` copied to
-  `adapters/claude/plugin/hooks/session_start.py`
-- `adapters/claude/plugin/server/dbond.py` with `session-binding` and
-  `session-status`
-
-Claude Code runs hooks in Desktop Code sessions as well as terminal sessions,
-but the installed Desktop-owned session must actually load this plugin and
-its hook. Verify with `/hooks` and a controlled resume. The standalone
-Desktop MCPB only supplies MCP tools; it does not install this Claude Code
-plugin hook or edit user settings.
-
-`SessionStart` adds context before the first model response after startup or
-resume. It cannot create an interactive idle turn, renew an expired Monitor
-without an active host turn, or wake a closed chat. `initialUserMessage` is
-only a turn starter in noninteractive `-p` mode.
-
-Run source checks:
-
-```sh
-python3 -m unittest discover -s adapters/claude/session-hooks -p 'test_*.py'
-```
-
-Source: [Claude Code hooks reference](https://code.claude.com/docs/en/hooks).
+[Claude Code hook lifecycle](https://code.claude.com/docs/en/hooks) · [Session inbox](https://code.claude.com/docs/en/cross-session-messaging#the-sessions-inbox-socket)

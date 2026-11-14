@@ -126,8 +126,8 @@ enum SessionConnectionGuide {
             if kind == .claude {
                 let command = executable + " session-listen " + alias
                 copy = command
-                body += "If the host Monitor needs reconnecting, run in that exact Claude session:\n\(command)\n\n"
-                body += "Keep the Monitor open. It expires with the host session; restart it in that session to resume saved direct and Dot cursors. An open listener does not itself prove the agent answered.\n\n"
+                body += "If this host has no native inbox or channel, use its Monitor in that Claude session:\n\(command)\n\n"
+                body += "For Claude Code on this Mac, register the chat to connect its own inbox. An open chat can receive messages while idle. A host using the temporary Monitor can resume from its saved position when the watch expires.\n\n"
                 body += "For a direct_message, answer from that same host with the JSON sender_id and source_id:\n"
                 body += executable + " direct-answer " + alias + " SENDER_ID SOURCE_ID \"REPLY\"\n"
                 body += "That preserves the original in_reply_to correlation."

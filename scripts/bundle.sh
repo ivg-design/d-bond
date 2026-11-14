@@ -16,7 +16,7 @@ product_dir="$(swift build -c release --show-bin-path)"
 cp "$product_dir/DBond" "$BIN_DIR/DBond"
 cp "$ROOT/scripts/native_link.py" "$RES_DIR/"
 install -m 755 "$ROOT/adapters/cli/dbond.py" "$RES_DIR/dbond"
-for module in owner.py wake_registration.py codex_registration.py; do
+for module in owner.py wake_registration.py codex_registration.py claude_registration.py; do
   install -m 644 "$ROOT/adapters/cli/$module" "$RES_DIR/$module"
 done
 
@@ -41,21 +41,25 @@ mkdir -p "$AGENT_DIR/claude-code-marketplace/plugin/hooks"
 install -m 644 "$ROOT/adapters/claude/plugin/hooks/hooks.json" "$AGENT_DIR/claude-code-marketplace/plugin/hooks/"
 install -m 755 "$ROOT/adapters/claude/plugin/hooks/session_start.py" "$AGENT_DIR/claude-code-marketplace/plugin/hooks/"
 install -m 644 "$ROOT/adapters/claude/plugin/.mcp.json" "$AGENT_DIR/claude-code-marketplace/plugin/.mcp.json"
-for name in dbond.py mcp.py owner.py wake_registration.py codex_registration.py; do
+for name in dbond.py mcp.py owner.py wake_registration.py codex_registration.py claude_registration.py; do
   install -m 644 "$ROOT/adapters/claude/plugin/server/$name" "$AGENT_DIR/claude-code-marketplace/plugin/server/$name"
 done
 install -m 755 "$ROOT/adapters/claude/plugin/server/launch.sh" "$AGENT_DIR/claude-code-marketplace/plugin/server/launch.sh"
 install -m 644 "$ROOT/adapters/codex/.agents/plugins/marketplace.json" "$AGENT_DIR/codex-marketplace/.agents/plugins/marketplace.json"
 ditto "$ROOT/adapters/codex/plugins/d-bond-local-control" "$AGENT_DIR/codex-marketplace/plugins/d-bond-local-control"
 install -m 644 "$ROOT/adapters/direct/server/mcp.py" "$AGENT_DIR/direct-stdio/adapters/direct/server/mcp.py"
-mkdir -p "$AGENT_DIR/codex-session"
-for module in dbond.py owner.py wake_registration.py codex_registration.py; do
+mkdir -p "$AGENT_DIR/codex-session" "$AGENT_DIR/claude-session"
+for module in dbond.py owner.py wake_registration.py codex_registration.py claude_registration.py; do
   install -m 644 "$ROOT/adapters/cli/$module" "$AGENT_DIR/direct-stdio/adapters/cli/$module"
   install -m 644 "$ROOT/adapters/cli/$module" "$AGENT_DIR/codex-session/$module"
+  install -m 644 "$ROOT/adapters/cli/$module" "$AGENT_DIR/claude-session/$module"
 done
 for module in "$ROOT"/adapters/codex-session/*.py; do
   [[ "$(basename "$module")" == test_* ]] && continue
   install -m 644 "$module" "$AGENT_DIR/codex-session/"
+done
+for module in listener.py inbox.py; do
+  install -m 644 "$ROOT/adapters/claude-session/$module" "$AGENT_DIR/claude-session/$module"
 done
 cat > "$AGENT_DIR/direct-stdio/launch.sh" <<'SH'
 #!/bin/sh
@@ -83,8 +87,8 @@ cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
   <key>CFBundleIconFile</key><string>D-Bond.icns</string>
   <key>CFBundleName</key><string>D-Bond</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.3.7</string>
-  <key>CFBundleVersion</key><string>10</string>
+  <key>CFBundleShortVersionString</key><string>0.3.8</string>
+  <key>CFBundleVersion</key><string>11</string>
   <key>LSUIElement</key><true/>
   <key>NSHighResolutionCapable</key><true/>
 </dict>
