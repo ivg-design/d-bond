@@ -71,12 +71,14 @@ public final class Hub: @unchecked Sendable {
     private let heraldSupport: URL?
     private var ledger:Ledger
     private var nativeWorker:Process?
+    private var observerGeneration = 0
+    private let observerQueue = DispatchQueue(label: "design.ivg.dbond.dot-observer")
     private var subscribers:[String:Int] = [:]
     private var directSubscribers:[String:Int] = [:]
     public convenience init() throws {
         let base = FileManager.default.urls(for:.applicationSupportDirectory,in:.userDomainMask)[0]
         try self.init(directory:base.appendingPathComponent("D-Bond Proof of Concept"),port:18768)
-        startNativeObserver()
+        refreshDotConnector()
     }
     public init(directory:URL, port:UInt16, heraldFixture:URL? = nil, handler:@escaping Handler = { _,id,_ in "Local demo received " + id }, dotSender:DotSender? = nil) throws {
         self.handler = handler; self.dotSender = dotSender ?? { service,id,payload,onUpdate in try sendViaDot(service:service,id:id,payload:payload,onUpdate:onUpdate) }; self.heraldSupport = heraldFixture; let fm = FileManager.default
@@ -138,19 +140,29 @@ public final class Hub: @unchecked Sendable {
         }
     }
     deinit { if nativeWorker?.isRunning == true { nativeWorker?.terminate() }; close(ownerLock) }
-    private func startNativeObserver() {
+    public func refreshDotConnector() {
+        observerQueue.async { [weak self] in
+            guard let self else { return }
+            self.observerGeneration += 1
+            if self.nativeWorker?.isRunning == true { self.nativeWorker?.terminate() }
+            self.startNativeObserver(generation: self.observerGeneration)
+        }
+    }
+
+    private func startNativeObserver(generation: Int) {
+        guard generation == observerGeneration else { return }
         nativeWorker = observeNativeDot(onExit: { [weak self] in
-            self?.restartNativeObserver()
+            self?.restartNativeObserver(generation: generation)
         }) { [weak self] service,id,state,detail in
             guard let self else { return true }
             if state == "dot_push" { return self.recordDotPush(service:service,sourceID:id,detail:detail) }
             return self.recordDotReceipt(service:service,id:id,state:state,reply:detail)
         }
-        if nativeWorker == nil { restartNativeObserver() }
+        if nativeWorker == nil { restartNativeObserver(generation: generation) }
     }
 
-    private func restartNativeObserver() {
-        work.asyncAfter(deadline: .now() + 2) { [weak self] in self?.startNativeObserver() }
+    private func restartNativeObserver(generation: Int) {
+        observerQueue.asyncAfter(deadline: .now() + 2) { [weak self] in self?.startNativeObserver(generation: generation) }
     }
 
     private var base:String { "http://127.0.0.1:\(server.port)" }

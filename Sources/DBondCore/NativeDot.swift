@@ -2,17 +2,41 @@ import Foundation
 
 private func nativeCommand(_ mode:String) throws -> (Process,Pipe) {
     let fm = FileManager.default
-    let python = URL(fileURLWithPath: ProcessInfo.processInfo.environment["DBOND_DOT_PYTHON"] ?? fm.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/DotBridge/venv/bin/python").path)
+    let environment = ProcessInfo.processInfo.environment
+    #if DBOND_APP_BUNDLE
+    let home = fm.homeDirectoryForCurrentUser
+    let owned = DotConnector().selectedRoute == "owned"
+    #else
+    let fixture = environment["DBOND_TEST_HOME"].map { URL(fileURLWithPath: $0) }
+    let home = fixture ?? fm.homeDirectoryForCurrentUser
+    let owned = fixture != nil || DotConnector().selectedRoute == "owned"
+    #endif
+    let support = home.appendingPathComponent("Library/Application Support")
+    let legacyRoot = environment["DBOND_DOTBRIDGE_DIR"] ?? support.appendingPathComponent("DotBridge").path
+    let ownedRoot = support.appendingPathComponent("D-Bond/Dot Connector").path
+    let root = owned ? ownedRoot : legacyRoot
+    let embedded = Bundle.main.resourceURL?.appendingPathComponent("dot-runtime/python/bin/python3.13")
+    let development = URL(fileURLWithPath: root).appendingPathComponent(owned ? "runtime/bin/python3" : "venv/bin/python")
+    let python = environment["DBOND_DOT_PYTHON"].map { URL(fileURLWithPath: $0) } ??
+        embedded.flatMap { fm.isExecutableFile(atPath: $0.path) ? $0 : nil } ?? development
     #if DBOND_APP_BUNDLE
     let helper = Bundle.main.url(forResource: "native_link", withExtension: "py")
     #else
     // SwiftPM probes run directly from the source checkout.
     let source = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("scripts/native_link.py")
-    let helper = Bundle.main.bundleURL.pathExtension == "app" ? Bundle.main.url(forResource: "native_link", withExtension: "py") : source
+    let helper = Bundle.main.bundleURL.pathExtension == "app" ? Bundle.main.url(forResource: "native_link", withExtension: "py") :
+        environment["DBOND_DOT_HELPER"].map { URL(fileURLWithPath: $0) } ?? source
     #endif
     guard let helper, fm.isExecutableFile(atPath:python.path), fm.fileExists(atPath:helper.path) else { throw Fault.message("Native Dot helper unavailable.") }
     let p=Process(), out=Pipe()
-    p.executableURL=python; p.arguments=["-I",helper.path,mode]; p.standardOutput=out; p.standardError=FileHandle.nullDevice
+    var configuration = environment
+    configuration["DBOND_DOTBRIDGE_DIR"] = root
+    configuration["DBOND_LEGACY_DOTBRIDGE_DIR"] = legacyRoot
+    configuration["DBOND_OWNED_DOTBRIDGE_DIR"] = ownedRoot
+    configuration["HOME"] = home.path
+    configuration["DBOND_SELECTED_DOT_ROUTE"] = owned ? "owned" : "legacy"
+    p.environment = configuration
+    p.executableURL=python; p.arguments=["-I","-B",helper.path,mode]; p.standardOutput=out; p.standardError=FileHandle.nullDevice
     return (p,out)
 }
 func nativeStatus() -> String {
@@ -22,7 +46,7 @@ func nativeStatus() -> String {
         guard p.terminationStatus==0, let r=try JSONSerialization.jsonObject(with:data) as? [String:Any] else { throw Fault.message("Unavailable") }
         if r["blocked"] as? Bool == true { return "D-Bond route conflict. Sending is blocked." }
         return r["active"] as? Int == 1 ? "Dot is linked to d-bond. All paired services share this connection." : "No standing Dot link. Service pairings are saved; a queued request is not a wake."
-    } catch { return "Local Dot transport unavailable." }
+    } catch { return "Dot is offline. Open Connectors → Dot to check the connection." }
 }
 func sendViaDot(service:String,id:String,payload:Data,onUpdate:@escaping (String,String)->Void) throws -> (state:String,reply:String) {
     let (p,out)=try nativeCommand("send"), input=Pipe()

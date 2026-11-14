@@ -8,6 +8,19 @@ func run() throws {
     let args = CommandLine.arguments
     guard args.count >= 3 else { throw ProbeError() }
     let directory = URL(fileURLWithPath:args[1]); let fixture = UInt16(args[2]) ?? 0
+    let nativeFixture = args.dropFirst(3).contains("--native")
+    if nativeFixture {
+        let environment = ProcessInfo.processInfo.environment
+        guard let root = environment["DBOND_TEST_HOME"], root.hasPrefix("/"),
+              let python = environment["DBOND_DOT_PYTHON"], FileManager.default.isExecutableFile(atPath: python),
+              let helper = environment["DBOND_DOT_HELPER"], FileManager.default.fileExists(atPath: helper) else { throw ProbeError() }
+        let home = URL(fileURLWithPath: root).resolvingSymlinksInPath().standardizedFileURL
+        let temporary = URL(fileURLWithPath: NSTemporaryDirectory()).resolvingSymlinksInPath().standardizedFileURL
+        let shortTemporary = URL(fileURLWithPath: "/tmp").resolvingSymlinksInPath().standardizedFileURL
+        guard (home.path.hasPrefix(temporary.path + "/") || home.path.hasPrefix(shortTemporary.path + "/")),
+              directory.resolvingSymlinksInPath().standardizedFileURL.path ==
+                home.appendingPathComponent("Library/Application Support/D-Bond Proof of Concept").path else { throw ProbeError() }
+    }
     let handler:Handler = { service,id,payload in
         guard fixture != 0 else { return "Local demo received " + id }
         let value = try JSONSerialization.jsonObject(with:payload,options:.fragmentsAllowed)
@@ -42,7 +55,8 @@ func run() throws {
               object?["text"] as? String != nil else { throw ProbeError() }
         return ("dot_stored","fixture return \(source) stored")
     }
-    let hub = try Hub(directory:directory,port:0,heraldFixture:directory.appendingPathComponent("fake-herald"),handler:handler,dotSender:fixtureDot)
+    let hub = try Hub(directory:directory,port:0,heraldFixture:directory.appendingPathComponent("fake-herald"),handler:handler,dotSender:nativeFixture ? nil : fixtureDot)
+    if nativeFixture { hub.refreshDotConnector() }
     let ownerSocket = try OwnerSocket(hub:hub,directory:directory)
     _ = ownerSocket
     func emit(_ obj:[String:Any]) throws { let data = try JSONSerialization.data(withJSONObject:obj); FileHandle.standardOutput.write(data + Data([10])) }

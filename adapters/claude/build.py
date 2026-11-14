@@ -24,6 +24,7 @@ def main():
                               ("LICENSE", ROOT / "LICENSE"),
                               ("server/d-bond-launcher", launcher),
                               ("server/launch.sh", HERE / "server/launch.sh"),
+                              ("server/python-launch.sh", ROOT / "adapters/runtime/python_launch.sh"),
                               ("server/mcp.py", HERE / "server/mcp.py"),
                               ("server/dbond.py", ROOT / "adapters/cli/dbond.py"),
                               *[(f"server/{name}", ROOT / "adapters/cli" / name)
@@ -33,6 +34,7 @@ def main():
     plugin_server.mkdir(exist_ok=True)
     shutil.copy2(HERE / "server/mcp.py", plugin_server / "mcp.py")
     shutil.copy2(HERE / "server/launch.sh", plugin_server / "launch.sh")
+    shutil.copy2(ROOT / "adapters/runtime/python_launch.sh", plugin_server / "python-launch.sh")
     shutil.copy2(ROOT / "adapters/cli/dbond.py", plugin_server / "dbond.py")
     for name in ("owner.py", "codex_registration.py", "claude_registration.py", "wake_registration.py"):
         shutil.copy2(ROOT / "adapters/cli" / name, plugin_server / name)

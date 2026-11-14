@@ -3,7 +3,11 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_NAME="D-Bond"
-APP_DIR="$ROOT/dist/$APP_NAME.app"
+mkdir -p "$ROOT/dist"
+staging_dir="$(mktemp -d "$ROOT/dist/.bundle.XXXXXX")"
+icon_dir="$(mktemp -d)"
+trap 'rm -rf "$staging_dir" "$icon_dir"' EXIT
+APP_DIR="$staging_dir/$APP_NAME.app"
 BIN_DIR="$APP_DIR/Contents/MacOS"
 RES_DIR="$APP_DIR/Contents/Resources"
 BUNDLE_ID="${DBOND_BUNDLE_ID:-design.ivg.dbond}"
@@ -17,7 +21,24 @@ cp "$product_dir/DBond" "$BIN_DIR/DBond"
 /usr/bin/strip -S "$BIN_DIR/DBond"
 install -m 644 "$ROOT/LICENSE" "$ROOT/THIRD_PARTY_NOTICES.md" "$RES_DIR/"
 cp "$ROOT/scripts/native_link.py" "$RES_DIR/"
-install -m 755 "$ROOT/adapters/cli/dbond.py" "$RES_DIR/dbond"
+python3 "$ROOT/scripts/package_dot_runtime.py" --output "$RES_DIR/dot-runtime"
+mkdir -p "$RES_DIR/dot-host" "$RES_DIR/dot-plugin"
+for name in connector provision core.py host.py requirements.lock upstream.json UPSTREAM_NOTICE.md; do
+  cp -p "$ROOT/adapters/dot-host/$name" "$RES_DIR/dot-host/"
+done
+ditto "$ROOT/adapters/dot-host/vendor" "$RES_DIR/dot-host/vendor"
+ditto "$ROOT/adapters/dot" "$RES_DIR/dot-plugin"
+mkdir -p "$RES_DIR/dot-ingress"
+install -m 755 "$ROOT/adapters/dot-ingress/ingress" "$RES_DIR/dot-ingress/"
+install -m 644 "$ROOT/adapters/dot-ingress/ingress.py" "$RES_DIR/dot-ingress/"
+install -m 644 "$ROOT/adapters/cli/dbond.py" "$RES_DIR/dbond.py"
+cat > "$RES_DIR/dbond" <<'SH'
+#!/bin/sh
+set -eu
+HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+exec /bin/sh "$HERE/agent-installers/python-launch.sh" "$HERE/dbond.py" "$@"
+SH
+chmod 755 "$RES_DIR/dbond"
 for module in owner.py wake_registration.py codex_registration.py claude_registration.py; do
   install -m 644 "$ROOT/adapters/cli/$module" "$RES_DIR/$module"
 done
@@ -33,6 +54,19 @@ mkdir -p "$AGENT_DIR/claude-code-marketplace/.claude-plugin" \
   "$AGENT_DIR/codex-marketplace/plugins/d-bond-local-control" \
   "$AGENT_DIR/direct-stdio/adapters/direct/server" \
   "$AGENT_DIR/direct-stdio/adapters/cli"
+install -m 644 "$ROOT/adapters/runtime/python_launch.sh" "$AGENT_DIR/python-launch.sh"
+mkdir -p "$AGENT_DIR/examples/vollna" "$AGENT_DIR/adapters/cli"
+install -m 644 "$ROOT/examples/vollna/forward_job.py" "$ROOT/examples/vollna/README.md" "$AGENT_DIR/examples/vollna/"
+cat > "$AGENT_DIR/examples/vollna/forward-job" <<'SH'
+#!/bin/sh
+set -eu
+HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+exec /bin/sh "$HERE/../../python-launch.sh" "$HERE/forward_job.py" "$@"
+SH
+chmod 755 "$AGENT_DIR/examples/vollna/forward-job"
+for module in dbond.py owner.py wake_registration.py codex_registration.py claude_registration.py; do
+  install -m 644 "$ROOT/adapters/cli/$module" "$AGENT_DIR/adapters/cli/$module"
+done
 install -m 644 "$ROOT/dist/d-bond-claude.mcpb" "$AGENT_DIR/d-bond-claude.mcpb"
 /usr/bin/unzip -p "$AGENT_DIR/d-bond-claude.mcpb" manifest.json > "$AGENT_DIR/claude-desktop-manifest.json"
 cat > "$AGENT_DIR/claude-code-marketplace/.claude-plugin/marketplace.json" <<'JSON'
@@ -42,11 +76,13 @@ install -m 644 "$ROOT/adapters/claude/plugin/.claude-plugin/plugin.json" "$AGENT
 mkdir -p "$AGENT_DIR/claude-code-marketplace/plugin/hooks"
 install -m 644 "$ROOT/adapters/claude/plugin/hooks/hooks.json" "$AGENT_DIR/claude-code-marketplace/plugin/hooks/"
 install -m 755 "$ROOT/adapters/claude/plugin/hooks/session_start.py" "$AGENT_DIR/claude-code-marketplace/plugin/hooks/"
+install -m 755 "$ROOT/adapters/claude/plugin/hooks/launch.sh" "$AGENT_DIR/claude-code-marketplace/plugin/hooks/"
 install -m 644 "$ROOT/adapters/claude/plugin/.mcp.json" "$AGENT_DIR/claude-code-marketplace/plugin/.mcp.json"
 for name in dbond.py mcp.py owner.py wake_registration.py codex_registration.py claude_registration.py; do
   install -m 644 "$ROOT/adapters/claude/plugin/server/$name" "$AGENT_DIR/claude-code-marketplace/plugin/server/$name"
 done
 install -m 755 "$ROOT/adapters/claude/plugin/server/launch.sh" "$AGENT_DIR/claude-code-marketplace/plugin/server/launch.sh"
+install -m 644 "$ROOT/adapters/runtime/python_launch.sh" "$AGENT_DIR/claude-code-marketplace/plugin/server/python-launch.sh"
 install -m 644 "$ROOT/adapters/codex/.agents/plugins/marketplace.json" "$AGENT_DIR/codex-marketplace/.agents/plugins/marketplace.json"
 ditto "$ROOT/adapters/codex/plugins/d-bond-local-control" "$AGENT_DIR/codex-marketplace/plugins/d-bond-local-control"
 install -m 644 "$ROOT/adapters/direct/server/mcp.py" "$AGENT_DIR/direct-stdio/adapters/direct/server/mcp.py"
@@ -67,18 +103,13 @@ cat > "$AGENT_DIR/direct-stdio/launch.sh" <<'SH'
 #!/bin/sh
 set -eu
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-exec python3 -B "$HERE/adapters/direct/server/mcp.py"
+exec /bin/sh "$HERE/python-launch.sh" "$HERE/adapters/direct/server/mcp.py"
 SH
 chmod 755 "$AGENT_DIR/direct-stdio/launch.sh"
-icon_dir="$(mktemp -d)"
-trap 'rm -rf "$icon_dir"' EXIT
+install -m 644 "$ROOT/adapters/runtime/python_launch.sh" "$AGENT_DIR/direct-stdio/python-launch.sh"
 swift "$ROOT/scripts/make_app_icon.swift" "$ROOT/Assets/d-bond-app-icon.png" "$icon_dir/D-Bond.iconset"
 iconutil -c icns "$icon_dir/D-Bond.iconset" -o "$RES_DIR/D-Bond.icns"
 install -m 644 "$ROOT/Assets/d-bond-menu-icon.svg" "$RES_DIR/d-bond-menu-icon.svg"
-mkdir -p "$RES_DIR/ServiceIcons"
-for icon in "$ROOT/Assets/ServiceIcons/"*.png; do
-    if [ -f "$icon" ]; then install -m 644 "$icon" "$RES_DIR/ServiceIcons/"; fi
-done
 cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -89,8 +120,8 @@ cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
   <key>CFBundleIconFile</key><string>D-Bond.icns</string>
   <key>CFBundleName</key><string>D-Bond</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.3.10</string>
-  <key>CFBundleVersion</key><string>13</string>
+  <key>CFBundleShortVersionString</key><string>0.4.0</string>
+  <key>CFBundleVersion</key><string>14</string>
   <key>LSUIElement</key><true/>
   <key>NSHighResolutionCapable</key><true/>
 </dict>
@@ -100,5 +131,13 @@ PLIST
 
 # Generated Python caches are not application assets.
 find "$RES_DIR" -type d -name __pycache__ -prune -exec rm -rf '{}' +
-codesign --force --deep --sign - "$APP_DIR"
-echo "Created ad hoc signed app: $APP_DIR"
+python3 "$ROOT/scripts/release_sign.py" sign --app "$APP_DIR"
+python3 "$ROOT/scripts/package_dot_runtime.py" --output "$RES_DIR/dot-runtime" --smoke-only
+if [[ -d "$ROOT/dist/$APP_NAME.app" ]]; then
+  mv "$ROOT/dist/$APP_NAME.app" "$staging_dir/previous.app"
+fi
+if ! mv "$APP_DIR" "$ROOT/dist/$APP_NAME.app"; then
+  if [[ -d "$staging_dir/previous.app" ]]; then mv "$staging_dir/previous.app" "$ROOT/dist/$APP_NAME.app"; fi
+  exit 1
+fi
+echo "Created signed app (${DBOND_SIGNING_MODE:-adhoc}): $ROOT/dist/$APP_NAME.app"

@@ -1,17 +1,24 @@
-"""D-Bond's local adapter to the installed DotBridge. No Slack or default inbox.
-The private native DB is read-only; sends use its authenticated public loopback API.
-"""
-import contextlib, datetime as dt, hashlib, json, os, pathlib, re, select, sqlite3, sys, time, tomllib
-from urllib.parse import urlsplit
+"""Connect the local broker to its selected Dot host and observe committed receipts."""
+import contextlib, datetime as dt, hashlib, json, os, pathlib, re, select, sqlite3, stat, sys, threading, time, tomllib
 ROOT = pathlib.Path(os.environ.get('DBOND_DOTBRIDGE_DIR', pathlib.Path.home() / 'Library/Application Support/DotBridge'))
 LEDGER = pathlib.Path.home() / 'Library/Application Support/D-Bond Proof of Concept/ledger.sqlite'
 CHANNEL = CALLER = 'd-bond'
 PREFIX = 'dbond1_'
+# Keep the public numeric push-address format. Two independent host databases
+# may both contain sequence 1 after an upgrade from a legacy installation.
+OWNED_OFFSET = 10**17
+OWNED = os.environ.get('DBOND_SELECTED_DOT_ROUTE') == 'owned'
+LEGACY_ROOT = pathlib.Path(os.environ.get('DBOND_LEGACY_DOTBRIDGE_DIR',
+    ROOT if not OWNED else pathlib.Path.home() / 'Library/Application Support/DotBridge'))
+OWNED_ROOT = pathlib.Path(os.environ.get('DBOND_OWNED_DOTBRIDGE_DIR',
+    ROOT if OWNED else pathlib.Path.home() / 'Library/Application Support/D-Bond/Dot Connector'))
+OUTPUT_LOCK = threading.Lock()
 UUID = re.compile('[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}')
 def compact(v):
     return json.dumps(v, ensure_ascii=False, separators=(',',':'), sort_keys=True, allow_nan=False)
 def emit(v):
-    print(compact(v),flush=True)
+    with OUTPUT_LOCK:
+        print(compact(v),flush=True)
 def routes(client):
     r=client.get('/api/subscriptions'); r.raise_for_status(); data=r.json()
     for key in ('slack_channels','native_channels','subscriptions'):
@@ -28,17 +35,21 @@ NATIVE_MESSAGES = """
                   AND json_extract(m.metadata,'$.caller_id')='d-bond'
                   AND json_extract(m.metadata,'$.dbond_conversation_route.delivery')='addressed_reply'
                 THEN json_extract(m.metadata,'$.dbond_conversation_route.recipient_service')
-        END AS recipient
+        END AS recipient, m.idempotency_key, r.kind
     FROM received_messages r
     LEFT JOIN messages m ON r.kind='reply' AND r.request_id=m.request_id
     WHERE r.channel=? AND r.kind IN ('push','reply')
 """
-def return_id(dbpath,service,payload):
+def return_id(dbpath,service,payload,*,owned=None):
+    owned = OWNED if owned is None else owned
     if not isinstance(payload,dict) or payload.get('kind') not in ('service.reply','service.ack'): return None
     match=re.fullmatch(r'@dot:([1-9][0-9]{0,17})',str(payload.get('in_reply_to','')))
     if not match or not isinstance(payload.get('text'),str) or not payload['text'].strip(): raise ValueError('invalid return envelope')
     with contextlib.closing(sqlite3.connect(dbpath.as_uri()+'?mode=ro',uri=True)) as db:
-        row=db.execute(NATIVE_MESSAGES+" AND r.sequence=?",(CHANNEL,int(match.group(1)))).fetchone()
+        seq = int(match.group(1))
+        if owned != (seq > OWNED_OFFSET):
+            raise ValueError('This reply belongs to the other Dot connection')
+        row=db.execute(NATIVE_MESSAGES+" AND r.sequence=?",(CHANNEL,seq - OWNED_OFFSET if owned else seq)).fetchone()
         if not row or row[3] != service: raise ValueError('return target not owned by the service')
         return row[1]
 def herald_capability(service):
@@ -140,6 +151,17 @@ def idempotency_key(service,event):
 def prior_native_receipt(dbpath,key,now):
     """A committed native row wins over changed routing or a lost POST response."""
     with contextlib.closing(sqlite3.connect(dbpath.as_uri()+'?mode=ro',uri=True)) as db:
+        if any(row[1]=='metadata' for row in db.execute('PRAGMA table_info(messages)')):
+            metadata=db.execute('SELECT metadata FROM messages WHERE channel=? AND idempotency_key=?',(CHANNEL,key)).fetchone()
+            if metadata:
+                try:
+                    m=json.loads(metadata[0])
+                    valid=(m.get('caller_id')==CALLER and UUID.fullmatch(m.get('conversation_id',''))
+                           and key==idempotency_key(m['conversation_id'],m.get('dbond_event')))
+                except (ValueError,TypeError,KeyError,AttributeError):
+                    valid=False
+                if not valid:
+                    return dict(state='dot_quarantined',reply='Stored native request correlation is invalid; no message submitted.')
         row=db.execute('''SELECT request_id,reply,reply_cancelled,expires_at,started_at
                           FROM messages WHERE channel=? AND idempotency_key=?''',
                        (CHANNEL,key)).fetchone()
@@ -194,38 +216,106 @@ def native_reply_timeout(config_path):
         raise ValueError('Invalid native reply timeout')
     return value
 
-def attempt_record(path,key):
+def _attempt_db(path,legacy_root=None):
     if path.is_symlink():
         raise ValueError('Native attempt journal must not be a symlink')
-    with contextlib.closing(sqlite3.connect(path)) as db:
+    path.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
+    db=sqlite3.connect(path,timeout=10)
+    try:
         os.chmod(path,0o600)
-        db.execute('CREATE TABLE IF NOT EXISTS attempts (key TEXT PRIMARY KEY, first_post_at REAL)')
-        row=db.execute('SELECT first_post_at FROM attempts WHERE key=?',(key,)).fetchone()
-        db.commit()
-    return None if row is None else {'first_post_at':row[0]}
+        db.execute('BEGIN IMMEDIATE')
+        db.execute("CREATE TABLE IF NOT EXISTS attempts (key TEXT PRIMARY KEY, first_post_at REAL, route_kind TEXT NOT NULL DEFAULT 'legacy', route_root TEXT)")
+        columns={row[1] for row in db.execute('PRAGMA table_info(attempts)')}
+        if 'route_kind' not in columns:
+            db.execute("ALTER TABLE attempts ADD COLUMN route_kind TEXT NOT NULL DEFAULT 'legacy'")
+        if 'route_root' not in columns:
+            db.execute('ALTER TABLE attempts ADD COLUMN route_root TEXT')
+        # A journal from before route selection was introduced belongs to the
+        # legacy host, even when its preflight marker has no POST timestamp.
+        db.execute('UPDATE attempts SET route_root=? WHERE route_root IS NULL',
+                   (str(pathlib.Path(legacy_root or LEGACY_ROOT).resolve()),))
+        return db
+    except BaseException:
+        db.close()
+        raise
 
-def record_attempt(path,key,first_post_at):
-    if path.is_symlink():
-        raise ValueError('Native attempt journal must not be a symlink')
-    with contextlib.closing(sqlite3.connect(path)) as db:
-        os.chmod(path,0o600)
-        db.execute('CREATE TABLE IF NOT EXISTS attempts (key TEXT PRIMARY KEY, first_post_at REAL)')
-        db.execute('''INSERT INTO attempts VALUES (?,?) ON CONFLICT(key) DO UPDATE SET
-                      first_post_at=CASE WHEN attempts.first_post_at IS NULL THEN excluded.first_post_at
-                      WHEN excluded.first_post_at IS NULL THEN attempts.first_post_at
-                      ELSE MIN(attempts.first_post_at,excluded.first_post_at) END''',(key,first_post_at))
+def attempt_record(path,key,*,legacy_root=None):
+    with contextlib.closing(_attempt_db(path,legacy_root)) as db:
+        row=db.execute('SELECT first_post_at,route_kind,route_root FROM attempts WHERE key=?',(key,)).fetchone()
         db.commit()
+    return None if row is None else dict(first_post_at=row[0],route_kind=row[1],route_root=row[2])
+
+def record_attempt(path,key,first_post_at,*,route_kind=None,route_root=None,legacy_root=None):
+    kind=route_kind or ('owned' if OWNED else 'legacy')
+    root=str(pathlib.Path(route_root or ROOT).resolve())
+    if kind not in ('legacy','owned'):
+        raise ValueError('Invalid native route identity')
+    with contextlib.closing(_attempt_db(path,legacy_root)) as db:
+        row=db.execute('SELECT route_kind,route_root FROM attempts WHERE key=?',(key,)).fetchone()
+        if row is not None and row!=(kind,root):
+            raise ValueError('Request is bound to another native route; no message submitted')
+        db.execute('INSERT OR IGNORE INTO attempts(key,first_post_at,route_kind,route_root) VALUES (?,?,?,?)',
+                   (key,first_post_at,kind,root))
+        if first_post_at is not None:
+            db.execute("UPDATE attempts SET first_post_at=CASE WHEN first_post_at IS NULL THEN ? ELSE MIN(first_post_at,?) END WHERE key=?",
+                       (first_post_at,first_post_at,key))
+        db.commit()
+
+def route_matches(attempt,kind,root):
+    return attempt is not None and attempt['route_kind']==kind and attempt['route_root']==str(pathlib.Path(root).resolve())
+
+def native_first_post(path,key):
+    try:
+        with contextlib.closing(sqlite3.connect(path.as_uri()+'?mode=ro',uri=True)) as db:
+            row=db.execute('SELECT created_at FROM messages WHERE channel=? AND idempotency_key=?',(CHANNEL,key)).fetchone()
+        if row is not None and isinstance(row[0],(int,float)) and row[0]>0:
+            return row[0]
+    except (sqlite3.Error,OSError):
+        pass
+    # Unknown historical timing can never reset the native dedupe window.
+    return 0
+
+def safe_prior_native_receipt(path,key,now):
+    try:
+        return prior_native_receipt(path,key,now)
+    except (sqlite3.Error,OSError):
+        return None
 
 def source_expiry(payload):
-    return None
+    if not isinstance(payload,dict) or not isinstance(payload.get('timing'),dict) or 'source_expires_at' not in payload['timing']:
+        return None
+    raw=(payload.get('timing') or {}).get('source_expires_at')
+    if not isinstance(raw,str):
+        raise ValueError('Source expiry must be an ISO timestamp')
+    parsed=dt.datetime.fromisoformat(raw.replace('Z','+00:00'))
+    if parsed.tzinfo is None:
+        raise ValueError('Source expiry needs a timezone')
+    return parsed.timestamp()
 
-def reconcile_before_send(env,dbpath,ledger_path,*,now=None,attempts_path=None,reply_timeout=None):
+def reconcile_before_send(env,dbpath,ledger_path,*,now=None,attempts_path=None,reply_timeout=None,route_kind=None,route_roots=None):
     """Return an observed or terminal outcome, or None when a new POST is safe."""
     now=time.time() if now is None else now
     service,event=env['service'],env['id']
     key=idempotency_key(service,event)
-    prior=prior_native_receipt(dbpath,key,now)
+    kind=route_kind or ('owned' if OWNED else 'legacy')
+    roots=dict(route_roots or {'legacy':LEGACY_ROOT,'owned':OWNED_ROOT})
+    roots[kind]=dbpath.parent
+    attempt=attempt_record(attempts_path,key,legacy_root=roots['legacy']) if attempts_path is not None else None
+    original=(dbpath if route_matches(attempt,kind,dbpath.parent) else pathlib.Path(attempt['route_root'])/'bridge.sqlite3') if attempt else dbpath
+    # Before route-aware journals existed every request used the legacy host.
+    # A committed row there wins over a freshly selected independent database.
+    if attempt is None and kind=='owned':
+        legacy=safe_prior_native_receipt(pathlib.Path(roots['legacy'])/'bridge.sqlite3',key,now)
+        if legacy is not None:
+            if attempts_path is not None:
+                record_attempt(attempts_path,key,native_first_post(pathlib.Path(roots['legacy'])/'bridge.sqlite3',key),route_kind='legacy',route_root=roots['legacy'],legacy_root=roots['legacy'])
+            return legacy
+    prior=safe_prior_native_receipt(original,key,now)
     if prior is not None:
+        if attempts_path is not None:
+            record_attempt(attempts_path,key,native_first_post(original,key),
+                           route_kind=attempt['route_kind'] if attempt else kind,
+                           route_root=attempt['route_root'] if attempt else dbpath.parent,legacy_root=roots['legacy'])
         return prior
     with contextlib.closing(sqlite3.connect(ledger_path.as_uri()+'?mode=ro',uri=True)) as db:
         row=db.execute('SELECT body FROM events WHERE service=? AND id=?',(service,event)).fetchone()
@@ -239,7 +329,14 @@ def reconcile_before_send(env,dbpath,ledger_path,*,now=None,attempts_path=None,r
     if expiry is not None and expiry<=now:
         return dict(state='dot_expired',reply='The admitted source expired before a native receipt was confirmed.')
     possible=previous_post_possible(frozen)
-    attempt=attempt_record(attempts_path,key) if attempts_path is not None else None
+    if attempt is None and possible and attempts_path is not None:
+        # Infer the original route for pre-journal broker attempts. Missing or
+        # pruned legacy rows must never authorize a POST into the owned host.
+        record_attempt(attempts_path,key,first_dispatch_at(frozen) or 0,route_kind='legacy',
+                       route_root=roots['legacy'],legacy_root=roots['legacy'])
+        attempt=attempt_record(attempts_path,key,legacy_root=roots['legacy'])
+    if attempt is not None and not route_matches(attempt,kind,dbpath.parent):
+        return dict(state='dot_route_blocked',reply='This request remains bound to its original Dot connection; no message submitted to the selected connection. Original-host receipts remain observable.')
     first_post=attempt['first_post_at'] if attempt is not None else None
     if attempt is None and possible:
         # Legacy attempts predate the durable journal. A live native request
@@ -252,11 +349,11 @@ def reconcile_before_send(env,dbpath,ledger_path,*,now=None,attempts_path=None,r
         if reply_timeout is None or now>=first_post+reply_timeout:
             return dict(state='dot_quarantined',reply='Earlier native POST is unresolved past its live retention window; no second remote association was created.')
         if attempts_path is not None and attempt is None:
-            record_attempt(attempts_path,key,first_post)
+            record_attempt(attempts_path,key,first_post,route_kind=kind,route_root=dbpath.parent,legacy_root=roots['legacy'])
     elif attempts_path is not None and attempt is None:
         # Persist before HTTP preflight. A crash or network outage before the
         # post-start marker is proof this adapter never submitted the message.
-        record_attempt(attempts_path,key,None)
+        record_attempt(attempts_path,key,None,route_kind=kind,route_root=dbpath.parent,legacy_root=roots['legacy'])
     return None
 
 PERMANENT_POST_CODES={'invalid_message','invalid_metadata','invalid_json',
@@ -282,7 +379,7 @@ def post_failure(response):
         return dict(state='dot_quarantined',reply='Native bridge rejected the message (HTTP '+str(status)+').')
     return None
 
-def send(client,env,route,dbpath=None,*,ledger_path=None,before_post=None):
+def send(client,env,route,dbpath=None,*,ledger_path=None,before_post=None,owned=None):
     service,event=env['service'],env['id']
     if not isinstance(service,str) or not UUID.fullmatch(service) or not isinstance(event,str) or not 0<len(event)<=120 or event.startswith('@dot:'):
         return dict(state='dot_quarantined',reply='Invalid local event address; no native message submitted.')
@@ -317,7 +414,7 @@ def send(client,env,route,dbpath=None,*,ledger_path=None,before_post=None):
         )
         conversation['delivery']='addressed_reply'
         raw['metadata']['dbond_conversation_route']=conversation
-    try: reply_to=return_id(dbpath or ROOT/'bridge.sqlite3',service,env['payload'])
+    try: reply_to=return_id(dbpath or ROOT/'bridge.sqlite3',service,env['payload'],owned=owned)
     except ValueError: return dict(state='dot_route_blocked',reply='Unknown return address for this service. No message submitted.')
     if reply_to:
         raw['metadata']['reply_to']=reply_to
@@ -374,55 +471,137 @@ def send(client,env,route,dbpath=None,*,ledger_path=None,before_post=None):
     return dict(state='dot_stored' if route['active'] else 'dot_waiting_for_link',reply=result['request_id'])
 def connect():
     import httpx
-    from dots_bridge.local_client import load_connection
-    cfg=load_connection(ROOT/'bridge.toml')
-    origin=urlsplit(cfg.base_url)
-    if origin.scheme!='http' or origin.hostname not in ('127.0.0.1','::1') or origin.username or origin.password:
-        raise ValueError('Only the installed private loopback API may receive the grant')
-    return httpx.Client(base_url=cfg.base_url,headers={'Authorization':'Bearer '+cfg.api_key},trust_env=False,follow_redirects=False,timeout=5)
-def deltas(db,seen,cursor):
+    with os.fdopen(os.open(ROOT/'bridge.toml',os.O_RDONLY|os.O_NOFOLLOW),'rb') as stream:
+        info=os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077 or info.st_size>65536:
+            raise ValueError('Dot configuration must be a private owner file')
+        config=tomllib.load(stream)
+    host=config.get('host','127.0.0.1')
+    port=config.get('port',8765)
+    key=config.get('api_key')
+    if host not in ('127.0.0.1','::1','localhost','0.0.0.0','::') or type(port) is not int or not 1<=port<=65535:
+        raise ValueError('Only the configured loopback API may receive the grant')
+    if not isinstance(key,str) or len(key)<32 or any(c.isspace() for c in key):
+        raise ValueError('Invalid local API grant')
+    address='[::1]' if host == '::1' else '127.0.0.1'
+    return httpx.Client(base_url=f'http://{address}:{port}',headers={'Authorization':'Bearer '+key},trust_env=False,follow_redirects=False,timeout=5)
+def deltas(db,seen,cursor,*,owned=None,allowed=None,include_pushes=True):
+    owned = OWNED if owned is None else owned
     # Indexed idempotency-key range limits reads to events originated by this adapter.
-    for meta,req,created,started,reply,cancelled,deadline,delivery in db.execute(
-        'SELECT metadata,request_id,created_at,started_at,reply,reply_cancelled,expires_at,delivery_status FROM messages WHERE idempotency_key>=? AND idempotency_key<? AND channel=?',
+    for meta,req,created,started,reply,cancelled,deadline,delivery,key in db.execute(
+        'SELECT metadata,request_id,created_at,started_at,reply,reply_cancelled,expires_at,delivery_status,idempotency_key FROM messages WHERE idempotency_key>=? AND idempotency_key<? AND channel=?',
         (PREFIX,PREFIX+'g',CHANNEL)):
         m=json.loads(meta); service=m.get('conversation_id',''); event=m.get('dbond_event','')
-        if m.get('caller_id')!=CALLER or not UUID.fullmatch(service) or not event: continue
+        if (m.get('caller_id')!=CALLER or not isinstance(service,str) or not UUID.fullmatch(service)
+                or not isinstance(event,str) or not event or key!=idempotency_key(service,event)
+                or (allowed is not None and not allowed(key,m,created))): continue
         for state,detail in [('dot_acknowledged', ('Dot acknowledged in %.3f seconds (from bridge storage); %s'%((started-created),req)) if started else None),
                              ('dot_replied',reply),('dot_cancelled',('Native request cancelled: '+req) if cancelled and reply is None else None),
                              ('dot_expired',('Native request expired: '+req) if deadline<=time.time() and not cancelled and reply is None else None)]:
             if detail is not None and (req,state) not in seen:
                 yield dict(service=service,id=event,state=state,reply=detail)
                 seen.add((req,state))
-    for seq,_,msg,service in db.execute(NATIVE_MESSAGES+" AND r.sequence>? ORDER BY r.sequence",(CHANNEL,cursor[0])):
+    for seq,_,msg,service,key,message_kind in db.execute(NATIVE_MESSAGES+" AND r.sequence>? ORDER BY r.sequence",(CHANNEL,cursor[0])):
         cursor[0]=seq
+        if message_kind=='push' and not include_pushes:
+            continue
+        if message_kind=='reply' and allowed is not None:
+            row=db.execute('SELECT metadata,created_at FROM messages WHERE channel=? AND idempotency_key=?',(CHANNEL,key)).fetchone()
+            if row is None or not allowed(key,json.loads(row[0]),row[1]):
+                continue
         if isinstance(service,str) and UUID.fullmatch(service):
-            yield dict(service=service,id='@dot:'+str(seq),state='dot_push',reply=msg)
-def watch(path,publish,parent=None):
+            yield dict(service=service,id='@dot:'+str(seq + OWNED_OFFSET if owned else seq),state='dot_push',reply=msg)
+def watch(path,publish,parent=None,*,owned=None,allowed=None,include_pushes=True):
     seen=set(); cursor=[0]
     while parent is None or os.getppid()==parent:
         try:
-            with contextlib.closing(sqlite3.connect(path.as_uri()+'?mode=ro',uri=True,isolation_level=None)) as db, contextlib.closing(select.kqueue()) as kq, contextlib.ExitStack() as stack:
-                db.execute('pragma query_only=ON')
-                if db.execute('pragma journal_mode').fetchone()[0]!='wal': raise ValueError('WAL required')
-                db.execute('select max(sequence) from received_messages').fetchone()
-                for item in (path,path.with_name(path.name+'-wal')):
-                    fd=os.open(item,os.O_RDONLY|os.O_NOFOLLOW);stack.callback(os.close,fd)
-                    kq.control([select.kevent(fd,filter=select.KQ_FILTER_VNODE,flags=select.KQ_EV_ADD|select.KQ_EV_CLEAR,fflags=select.KQ_NOTE_WRITE|select.KQ_NOTE_EXTEND|select.KQ_NOTE_DELETE|select.KQ_NOTE_RENAME|select.KQ_NOTE_REVOKE)],0,0)
+            with contextlib.closing(select.kqueue()) as kq, contextlib.ExitStack() as stack:
+                # Register the nearest existing directory BEFORE opening SQLite.
+                # Store creation/restoration and WAL replacement then wake this
+                # observer without idle reconnect scans, even for a missing host.
+                directory=path.parent
+                while not directory.exists(): directory=directory.parent
+                directory_fd=os.open(directory,os.O_RDONLY|os.O_NOFOLLOW);stack.callback(os.close,directory_fd)
+                kq.control([select.kevent(directory_fd,filter=select.KQ_FILTER_VNODE,flags=select.KQ_EV_ADD|select.KQ_EV_CLEAR,
+                    fflags=select.KQ_NOTE_WRITE|select.KQ_NOTE_EXTEND|select.KQ_NOTE_DELETE|select.KQ_NOTE_RENAME|select.KQ_NOTE_REVOKE)],0,0)
                 if parent is not None:
                     kq.control([select.kevent(parent,filter=select.KQ_FILTER_PROC,flags=select.KQ_EV_ADD|select.KQ_EV_ONESHOT,fflags=select.KQ_NOTE_EXIT)],0,0)
-                while True:
-                    for update in deltas(db,seen,cursor): publish(update)
-                    ev=kq.control(None,3,None)   # no scan or reconnect timer during idle operation
+                try:
+                    db=stack.enter_context(contextlib.closing(sqlite3.connect(path.as_uri()+'?mode=ro',uri=True,isolation_level=None)))
+                    db.execute('pragma query_only=ON')
+                    if db.execute('pragma journal_mode').fetchone()[0]!='wal': raise sqlite3.OperationalError('WAL required')
+                    db.execute('select max(sequence) from received_messages').fetchone()
+                    for item in (path,path.with_name(path.name+'-wal')):
+                        try: fd=os.open(item,os.O_RDONLY|os.O_NOFOLLOW)
+                        except FileNotFoundError: continue
+                        stack.callback(os.close,fd)
+                        kq.control([select.kevent(fd,filter=select.KQ_FILTER_VNODE,flags=select.KQ_EV_ADD|select.KQ_EV_CLEAR,
+                            fflags=select.KQ_NOTE_WRITE|select.KQ_NOTE_EXTEND|select.KQ_NOTE_DELETE|select.KQ_NOTE_RENAME|select.KQ_NOTE_REVOKE)],0,0)
+                except (sqlite3.Error,FileNotFoundError):
+                    ev=kq.control(None,4,None)
                     if any(e.filter==select.KQ_FILTER_PROC for e in ev): return
-                    if any(e.fflags&(select.KQ_NOTE_DELETE|select.KQ_NOTE_RENAME|select.KQ_NOTE_REVOKE) for e in ev): break
-                    time.sleep(.04) # coalesce writes, then read committed SQLite snapshot
+                    continue
+                while True:
+                    for update in deltas(db,seen,cursor,owned=owned,allowed=allowed,include_pushes=include_pushes): publish(update)
+                    ev=kq.control(None,4,None)
+                    if any(e.filter==select.KQ_FILTER_PROC for e in ev): return
+                    if any(e.filter==select.KQ_FILTER_VNODE and (e.ident==directory_fd or e.fflags&(select.KQ_NOTE_DELETE|select.KQ_NOTE_RENAME|select.KQ_NOTE_REVOKE)) for e in ev): break
+                    time.sleep(.04) # coalesce committed WAL changes; no idle timer
         except BrokenPipeError: return
-        except (sqlite3.Error,FileNotFoundError):
-            time.sleep(3) # repair an unavailable store; not an inbox check
+
+def observe_routes(publish,parent=None,*,selected_kind=None,route_roots=None,attempts_path=None,ledger_path=None):
+    kind=selected_kind or ('owned' if OWNED else 'legacy')
+    roots=dict(route_roots or {'legacy':LEGACY_ROOT,'owned':OWNED_ROOT})
+    attempts=attempts_path or LEDGER.with_name('native-link-attempts.sqlite')
+    ledger=ledger_path or LEDGER
+    def permitted(route,root,import_missing):
+        def accepts(key,metadata,created):
+            if not isinstance(metadata,dict): return False
+            service,event=metadata.get('conversation_id'),metadata.get('dbond_event')
+            if (metadata.get('caller_id')!=CALLER or not isinstance(service,str) or not UUID.fullmatch(service)
+                    or not isinstance(event,str) or key!=idempotency_key(service,event)):
+                return False
+            # A native row alone cannot invent a broker event.
+            try:
+                with contextlib.closing(sqlite3.connect(ledger.as_uri()+'?mode=ro',uri=True)) as owner:
+                    if owner.execute('SELECT 1 FROM events WHERE service=? AND id=?',(service,event)).fetchone() is None:
+                        return False
+                record=attempt_record(attempts,key,legacy_root=roots['legacy'])
+                if record is None and import_missing:
+                    record_attempt(attempts,key,created,route_kind=route,route_root=root,legacy_root=roots['legacy'])
+                    record=attempt_record(attempts,key,legacy_root=roots['legacy'])
+                return route_matches(record,route,root)
+            except (sqlite3.Error,OSError,ValueError):
+                return False
+        return accepts
+    # Migration precedes both watchers: old committed requests retain legacy
+    # ownership even if the first selected route after upgrade is the new host.
+    legacy=pathlib.Path(roots['legacy'])/'bridge.sqlite3'
+    try:
+        with contextlib.closing(sqlite3.connect(legacy.as_uri()+'?mode=ro',uri=True)) as db:
+            for key,meta,created in db.execute('SELECT idempotency_key,metadata,created_at FROM messages WHERE channel=? AND idempotency_key>=? AND idempotency_key<?',(CHANNEL,PREFIX,PREFIX+'g')):
+                permitted('legacy',roots['legacy'],True)(key,json.loads(meta),created)
+    except (sqlite3.Error,OSError):
+        pass
+    for route in ('legacy','owned'):
+        root=pathlib.Path(roots[route])
+        kwargs=dict(owned=route=='owned',allowed=permitted(route,root,route==kind),include_pushes=route==kind)
+        if route!=kind:
+            threading.Thread(target=watch,args=(root/'bridge.sqlite3',publish,parent),kwargs=kwargs,daemon=True).start()
+        else:
+            primary=(root/'bridge.sqlite3',kwargs)
+    watch(primary[0],publish,parent,**primary[1])
+
+def optional_reply_timeout(root):
+    try:
+        return native_reply_timeout(root/'bridge.toml')
+    except (OSError,ValueError,KeyError):
+        return None
+
 def main():
     mode=sys.argv[1]
     if mode=='observe':
-        watch(ROOT/'bridge.sqlite3',emit,os.getppid()); return
+        observe_routes(emit,os.getppid()); return
     if mode=='status':
         with connect() as c: emit(routes(c))
     elif mode=='send':
@@ -431,13 +610,13 @@ def main():
         attempts=LEDGER.with_name('native-link-attempts.sqlite')
         known=reconcile_before_send(env,ROOT/'bridge.sqlite3',LEDGER,
                                     attempts_path=attempts,
-                                    reply_timeout=native_reply_timeout(ROOT/'bridge.toml'))
+                                    reply_timeout=optional_reply_timeout(ROOT))
         if known is not None:
             emit(known)
             return
         with connect() as c:
             emit(send(c,env,routes(c),ROOT/'bridge.sqlite3',ledger_path=LEDGER,
-                      before_post=lambda: record_attempt(attempts,key,time.time())))
+                      before_post=lambda: record_attempt(attempts,key,time.time(),route_kind='owned' if OWNED else 'legacy',route_root=ROOT)))
     else: raise ValueError('mode')
 if __name__=='__main__':
     try:main()

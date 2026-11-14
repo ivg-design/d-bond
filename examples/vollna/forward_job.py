@@ -1,7 +1,7 @@
 """Send ONE authenticated, already persisted job version to the local broker.
 
 Call from your existing webhook watcher's dispatch boundary. No listener, poll,
-production configuration change, or proposal submission is performed here.
+production configuration change, or external account action is performed here.
 """
 import argparse
 import hashlib
@@ -26,7 +26,7 @@ def envelope(job_id, revision, job):
 
 def main():
     args = argparse.ArgumentParser(description=__doc__)
-    args.add_argument("--alias", default="vollna-intake")
+    args.add_argument("--alias", help="explicit local pairing alias; required unless --preview")
     args.add_argument("--job-id", required=True)
     args.add_argument("--revision", required=True)
     args.add_argument("--preview", action="store_true", help="validate locally and print the event ID without sending")
@@ -41,6 +41,8 @@ def main():
         if a.preview:
             print(json.dumps({"id": event["id"], "sent": False}))
             return
+        if not a.alias:
+            raise ValueError("Pass --alias for an explicitly configured local example pairing; no data sent.")
         p = dbond._read_pairing(a.alias)
         status, receipt = dbond._request(p, "POST", p["endpoint"], event)
         if status not in (200, 202) or receipt.get("id") != event["id"]:

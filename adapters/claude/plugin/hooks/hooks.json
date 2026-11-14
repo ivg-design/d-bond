@@ -7,8 +7,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/usr/bin/env",
-            "args": ["python3", "${CLAUDE_PLUGIN_ROOT}/hooks/session_start.py"],
+            "command": "/bin/sh",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/launch.sh"],
             "timeout": 15
           }
         ]

@@ -1,0 +1,43 @@
+#!/bin/sh
+# Verified CPython distribution, then hash-locked binary dependencies from PyPI.
+set -eu
+HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+STATE=$1
+case "$STATE" in /*) ;; *) echo 'Runtime state path must be absolute.' >&2; exit 64 ;; esac
+if [ -L "$STATE" ] || [ -L "$STATE/runtime" ]; then
+  echo 'Runtime state must not be a symbolic link.' >&2
+  exit 64
+fi
+umask 077
+mkdir -p "$STATE"
+chmod 700 "$STATE"
+LOCK="$STATE/provision.lock"
+if ! mkdir "$LOCK" 2>/dev/null; then
+  echo 'D-Bond runtime setup is already running; retry after it finishes.' >&2
+  exit 75
+fi
+STAGE="$STATE/.runtime-$$"
+trap 'rm -rf "$STAGE"; rmdir "$LOCK" 2>/dev/null || true' EXIT HUP INT TERM
+case "$(uname -m)" in
+  arm64) TARGET=aarch64; HASH=1afd3983237c2a10277345f235be730e9cb49a123e0574ed252dbf3a841a24e4 ;;
+  x86_64) TARGET=x86_64; HASH=a46bcdeecd28ba253522b321dcb3806da1b0ff581479fc1d27e9613e3ac44764 ;;
+  *) echo 'This runtime supports macOS Apple Silicon and Intel only.' >&2; exit 64 ;;
+esac
+if [ "$(uname -s)" != Darwin ]; then echo 'This runtime is for macOS.' >&2; exit 64; fi
+mkdir -p "$STAGE"
+if [ ! -x "$STATE/runtime/bin/python3" ]; then
+  URL="https://github.com/astral-sh/python-build-standalone/releases/download/20261110/cpython-3.13.18%2B20261110-$TARGET-apple-darwin-install_only.tar.gz"
+  /usr/bin/curl --fail --location --silent --show-error --proto '=https' --proto-redir '=https' \
+    --connect-timeout 20 --max-time 180 "$URL" -o "$STAGE/python.tar.gz"
+  ACTUAL=$(/usr/bin/shasum -a 256 "$STAGE/python.tar.gz")
+  if [ "${ACTUAL%% *}" != "$HASH" ]; then echo 'Python archive checksum mismatch.' >&2; exit 65; fi
+  /usr/bin/tar -xzf "$STAGE/python.tar.gz" -C "$STAGE"
+  PYTHON="$STAGE/python/bin/python3"
+else
+  PYTHON="$STATE/runtime/bin/python3"
+fi
+"$PYTHON" -I -m pip --isolated --disable-pip-version-check install --quiet --require-hashes \
+  --only-binary=:all: --index-url https://pypi.org/simple -r "$HERE/requirements.lock" >&2
+"$PYTHON" -I -c 'import fastmcp, uvicorn, cryptography, httpx'
+if [ ! -x "$STATE/runtime/bin/python3" ]; then mv "$STAGE/python" "$STATE/runtime"; fi
+/usr/bin/shasum -a 256 "$HERE/requirements.lock" | /usr/bin/awk '{print $1}' > "$STATE/runtime/requirements.sha256"

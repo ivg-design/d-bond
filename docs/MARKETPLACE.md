@@ -1,10 +1,12 @@
 # D-Bond public plugin listing evaluation
 
-**Status:** evaluation draft only, 12 November 2026. This file is not an OpenAI submission, public listing, or claim of eligibility. No package was uploaded and no representative was contacted.
+**Distribution note for 0.4.0 (14 November 2026).** D-Bond now ships a local MCP Events host. Each installer registers and authorizes their own endpoint. The optional skill ZIP references that installer’s private app binding. This release is available on GitHub. The directory evaluation below describes the earlier architecture and the requirements checked on 12 November 2026.
+
+**Original evaluation, 12 November 2026.** This file is not an OpenAI submission, public listing, or claim of eligibility. No package was uploaded and no representative was contacted.
 
 ## Assessment
 
-The current `adapters/dot/d-bond` package is a Dot skill that declares the existing Dot Bridge Transport app through a private app binding. Its instructions explicitly rely on that app already being connected and on the owner's one existing D-Bond/Dot setup. That binding is a private owner integration, not a public hosted MCP endpoint or a self-contained local MCP server bundled for each installer. It does not give arbitrary directory users access to the owner's Dot connection or authorize them to use the owner's account. Do not represent the current binding as a distributable public service.
+The original Dot package is a Dot skill that declares the existing Dot Bridge Transport app through a private app binding. Its instructions explicitly rely on that app already being connected and on the owner's one existing D-Bond/Dot setup. That binding is a private owner integration, not a public hosted MCP endpoint or a self-contained local MCP server bundled for each installer. It does not give arbitrary directory users access to the owner's Dot connection or authorize them to use the owner's account. Do not represent the current binding as a distributable public service.
 
 A custom marketplace or GitHub source is a separate distribution mechanism: it lets a person, repository, or workspace discover/install a plugin package. A Git-backed source does not turn a private app binding into a public service or publish the package in the universal Plugins Directory. Workspace publication is also confined to that workspace. For public directory review, the package must instead use a supported submission path and independently satisfy review requirements.
 

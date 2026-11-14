@@ -32,9 +32,12 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-## Service artwork and names
+## Dot connector and Python runtime
 
-These service icons and names remain the property of their respective owners;
-D-Bond's MIT license does not grant rights to third-party artwork or trademarks.
-See [service icon provenance](Assets/ServiceIcons/README.md). Codex and Claude
-icons are resolved from locally installed apps and are not redistributed here.
+The embedded MCP host includes unmodified portions of the MIT-licensed dots-bridge project. Its license, pinned revision and source inventory are included with the host. [Upstream notice](adapters/dot-host/UPSTREAM_NOTICE.md)
+
+The Apple silicon download includes CPython and third-party Python libraries. Interpreter and native-library notices are included under the packaged runtime. Python distributions carry their own license metadata. [Runtime notices](scripts/dot-runtime/README.md)
+
+## Service artwork
+
+Service icons are resolved from installed apps or selected by the owner for a connection. [Connection artwork](Assets/ServiceIcons/README.md)

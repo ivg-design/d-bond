@@ -15,6 +15,8 @@ private final class AgentSetupDocumentView: NSView {
 final class AgentSetup: NSObject, NSWindowDelegate {
     private static var current: AgentSetup?
     private let hub: Hub
+    private var onDotSetup: (() -> Void)?
+    private var onAddService: (() -> Void)?
     private let window: NSWindow
     private var scrollView: NSScrollView!
     private let target = NSPopUpButton()
@@ -25,13 +27,17 @@ final class AgentSetup: NSObject, NSWindowDelegate {
     private let desktopState = NSTextField(wrappingLabelWithString: "Checking Claude Desktop…")
     private let codexAction = NSButton(), claudeAction = NSButton(), desktopAction = NSButton()
     private let checkAction = NSButton()
+    private let heraldState = NSTextField(wrappingLabelWithString: "Checking Herald…")
+    private let heraldAction = NSButton()
     private var checkTask: Task<Void,Never>?
     private var saving = false
     private var updatingClaude = false
     private let setupNote = "The owner opened D-Bond's Agent Setup and sent this note to this exact paired connection. Use your D-Bond tools to inspect this connection and receive messages. This is setup information, not approval to submit, publish, or send anything else."
 
-    static func show(hub: Hub) {
+    static func show(hub: Hub, onDotSetup: (() -> Void)? = nil, onAddService: (() -> Void)? = nil) {
         if let current {
+            current.onDotSetup = onDotSetup
+            current.onAddService = onAddService
             current.refreshTargets(); current.checkInstalls()
             current.window.makeKeyAndOrderFront(nil)
             current.window.makeFirstResponder(current.window.contentView)
@@ -39,7 +45,7 @@ final class AgentSetup: NSObject, NSWindowDelegate {
             NSApp.activate(ignoringOtherApps: true)
             return
         }
-        let controller = AgentSetup(hub: hub)
+        let controller = AgentSetup(hub: hub, onDotSetup: onDotSetup, onAddService: onAddService)
         current = controller
         controller.refreshTargets(); controller.checkInstalls()
         controller.window.makeKeyAndOrderFront(nil)
@@ -54,15 +60,17 @@ final class AgentSetup: NSObject, NSWindowDelegate {
         scrollView.reflectScrolledClipView(scrollView.contentView)
     }
 
-    private init(hub: Hub) {
+    private init(hub: Hub, onDotSetup: (() -> Void)?, onAddService: (() -> Void)?) {
         self.hub = hub
+        self.onDotSetup = onDotSetup
+        self.onAddService = onAddService
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 650, height: 660),
                           styleMask: [.titled, .closable, .resizable, .miniaturizable],
                           backing: .buffered, defer: false)
         super.init()
         // This cached controller owns the window across closes. AppKit must not release it.
         window.isReleasedWhenClosed = false
-        window.title = "D-Bond · Agent Setup"
+        window.title = "D-Bond · Connectors"
         window.minSize = NSSize(width: 580, height: 560)
         window.center()
         window.delegate = self
@@ -100,9 +108,9 @@ final class AgentSetup: NSObject, NSWindowDelegate {
         brand.image = Brand.app ?? NSImage(systemSymbolName: "point.3.connected.trianglepath.dotted", accessibilityDescription: "D-Bond")
         brand.imageScaling = .scaleProportionallyUpOrDown
         brand.translatesAutoresizingMaskIntoConstraints = false
-        let title = label("D-Bond · Connect agents", size: 19, bold: true)
+        let title = label("D-Bond · Connectors", size: 19, bold: true)
         title.translatesAutoresizingMaskIntoConstraints = false
-        let subtitle = label("Install tools and contact a verified listener", size: 12)
+        let subtitle = label("Install hosts, connect services, and set up agents", size: 12)
         subtitle.translatesAutoresizingMaskIntoConstraints = false
         let scroll = NSScrollView()
         scrollView = scroll
@@ -117,7 +125,7 @@ final class AgentSetup: NSObject, NSWindowDelegate {
         stack.spacing = 12
         stack.translatesAutoresizingMaskIntoConstraints = false
 
-        for field in [codexState,claudeState,desktopState] {
+        for field in [heraldState,codexState,claudeState,desktopState] {
             field.font = .systemFont(ofSize:13,weight:.medium)
             field.textColor = .labelColor; field.isSelectable = true
             field.widthAnchor.constraint(equalToConstant:505).isActive = true
@@ -125,23 +133,29 @@ final class AgentSetup: NSObject, NSWindowDelegate {
         configure(codexAction, title:"Checking…", action:#selector(installCodex), id:"codex")
         configure(claudeAction, title:"Checking…", action:#selector(installClaudeCode), id:"claude")
         configure(desktopAction, title:"Checking…", action:#selector(openClaudeDesktop), id:"desktop")
+        configure(heraldAction, title:"Checking…", action:#selector(connectHerald), id:"herald")
         configure(checkAction, title:"Check again", action:#selector(checkInstalls), id:"refresh")
-        for item in [codexAction,claudeAction,desktopAction] { item.isEnabled = false }
+        for item in [heraldAction,codexAction,claudeAction,desktopAction] { item.isEnabled = false }
+        heraldState.identifier = .init("setup.herald.status")
         codexState.identifier = .init("setup.codex.status"); claudeState.identifier = .init("setup.claude.status")
         desktopState.identifier = .init("setup.desktop.status")
+        let herald = section("Herald notifications", "D-Bond delivers plain paired notifications to Herald's local API. Herald controls its own display, history, and sounds.", controls:[heraldState,heraldAction,button("Refresh Herald", action:#selector(refreshHeraldAction))])
+        let dot = section("Dot", "Connect your existing Dot through its configured local transport. A connection does not prove a chat turn or a reply.", controls:[button("Configure Dot Connector…", action:#selector(configureDot))])
         let desktop = section("Claude Desktop", "Manage the local extension in Claude Desktop → Settings → Extensions.", controls:[desktopState,desktopAction])
         let code = section("Claude Code", "Each session enrolls its own D-Bond pairing after installation. Claude Code controls wake permissions.", controls:[claudeState,claudeAction])
         let codex = section("Codex", "Local Control manages connections and rules. Direct messaging lets a chat talk to its paired services.", controls:[codexState,codexAction])
         let generic = section("Other stdio agents", "Copy a local MCP configuration for an agent that supports stdio tools. This does not wake an idle chat.", controls: [button("Copy stdio configuration", action: #selector(copyStdio))])
+        let vollna = section("Vollna job intake", "Use your existing authenticated webhook receiver and source ledger. The bundled sender example forwards one persisted job version; D-Bond does not install Vollna or start a watcher.", controls:[button("Create Vollna connection…", action:#selector(addService)),button("Reveal bundled Vollna example", action:#selector(revealVollnaExample))])
+        let service = section("Other services", "Give an existing app or script a local endpoint and one-time credential. Configure that producer explicitly; creating a connection does not start one.", controls:[button("Create service connection…", action:#selector(addService))])
         send.target = self; send.action = #selector(sendSetupNote)
         let recipients = section("Send to an active listener", "Only a paired, unpaused connection with an open direct message stream appears here. Delivery to that stream is not proof an AI turn started or answered.", controls: [target, button("Refresh listeners", action: #selector(refreshTargetsAction)), send, button("Copy setup note for a chosen chat", action: #selector(copySetupNote))])
         status.isSelectable = true
         status.maximumNumberOfLines = 0
         status.lineBreakMode = .byWordWrapping
-        let intro = label("Installed on this Mac", size:15,bold:true)
+        let intro = label("Available connectors", size:15,bold:true)
         let checkRow = NSStackView(views:[intro,checkAction]); checkRow.spacing = 12
         stack.addArrangedSubview(checkRow)
-        for view in [codex, code, desktop, generic, recipients, status] { stack.addArrangedSubview(view) }
+        for view in [herald, dot, codex, code, desktop, generic, vollna, service, recipients, status] { stack.addArrangedSubview(view) }
         content.addSubview(stack)
         scroll.documentView = content
         root.addSubview(brand)
@@ -194,6 +208,111 @@ final class AgentSetup: NSObject, NSWindowDelegate {
         control.title = title; control.isEnabled = enabled && !saving
     }
 
+    private var heraldApp: URL? {
+        let preferred = URL(fileURLWithPath:"/Applications/Herald.app",isDirectory:true)
+        if Bundle(url:preferred)?.bundleIdentifier == "com.ivg.herald" { return preferred }
+        return NSWorkspace.shared.urlForApplication(withBundleIdentifier:"com.ivg.herald")
+    }
+
+    private func heraldCatalogState() -> ConnectorCatalog.HeraldState {
+        ConnectorCatalog.herald(hasApp: heraldApp != nil,
+            routes: hub.snapshot().services.map { .init(name:$0.name,destination:$0.destination,paused:$0.paused) })
+    }
+
+    @objc private func refreshHeraldAction() { refreshHerald() }
+    private func refreshHerald() {
+        switch heraldCatalogState() {
+        case .needsApp(let paired):
+            heraldState.stringValue = paired.map { "\($0) is paired, but Herald is not installed. Install Herald before notifications can appear." }
+                ?? "Herald is not installed. Download the verified public DMG, then drag Herald to Applications."
+            setAction(heraldAction,"Install Herald…",enabled:true)
+        case .needsConnection:
+            heraldState.stringValue = "Herald is installed. No notification route is paired yet."
+            setAction(heraldAction,"Connect Herald notifications",enabled:true)
+        case .connected(let name):
+            heraldState.stringValue = "Paired: \(name). Herald's runtime availability is checked when a notification is delivered."
+            setAction(heraldAction,"Already paired",enabled:false)
+        case .paused(let name):
+            heraldState.stringValue = "\(name) is paused. Resume it in Connections."
+            setAction(heraldAction,"Paused in D-Bond",enabled:false)
+        case .multiple:
+            heraldState.stringValue = "More than one Herald route exists. Review Connections before changing notification setup."
+            setAction(heraldAction,"Review Connections",enabled:false)
+        }
+    }
+
+    @objc private func connectHerald() {
+        switch heraldCatalogState() {
+        case .needsApp:
+            setAction(heraldAction,"Downloading Herald…",enabled:false)
+            status.stringValue = "Downloading and verifying the public Herald disk image…"
+            Task { [weak self] in
+                guard let self else { return }
+                do {
+                    let downloads = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Downloads",isDirectory:true)
+                    let image = try await HeraldInstaller.download(to: downloads)
+                    self.refreshHerald()
+                    if NSWorkspace.shared.open(image) {
+                        self.status.stringValue = "Opened verified Herald disk image. Drag Herald to Applications, then choose Refresh Herald. No notification was sent."
+                    } else {
+                        self.show("Verified download is ready", "Open \(image.path) in Finder and drag Herald to Applications.")
+                    }
+                } catch {
+                    self.refreshHerald()
+                    self.showHeraldDownloadFailure(error)
+                }
+            }
+        case .needsConnection:
+            do {
+                _ = try hub.pair(name:"Herald / Notifications",destination:"herald",
+                    sop:OwnerSOP.pairedHeraldNotifications(destination:"herald",enabled:true))
+                refreshHerald()
+                status.stringValue = "Herald / Notifications is paired locally. D-Bond will use Herald's local API when an authorized request arrives; no banner was sent."
+            } catch {
+                refreshHerald()
+                show("Could not connect Herald",error.localizedDescription)
+            }
+        default: refreshHerald()
+        }
+    }
+
+    private func showHeraldDownloadFailure(_ error: Error) {
+        let alert = Brand.alert()
+        alert.messageText = "Could not verify Herald download"
+        alert.informativeText = error.localizedDescription + " You can get Herald from its official public release page."
+        alert.addButton(withTitle:"Open official release page")
+        alert.addButton(withTitle:"Cancel")
+        if alert.runModal() == .alertFirstButtonReturn {
+            _ = NSWorkspace.shared.open(ConnectorCatalog.heraldRelease)
+        }
+    }
+
+    @objc private func configureDot() {
+        guard let onDotSetup else {
+            show("Dot connector unavailable", "Open D-Bond Settings to configure the local Dot connector.")
+            return
+        }
+        onDotSetup()
+    }
+
+    @objc private func addService() {
+        guard let onAddService else {
+            show("Connection setup unavailable", "Open Connections and choose Add Connection to pair a service.")
+            return
+        }
+        onAddService()
+    }
+
+    @objc private func revealVollnaExample() {
+        guard let file = Bundle.main.resourceURL?.appendingPathComponent("agent-installers/examples/vollna/forward-job"),
+              FileManager.default.isExecutableFile(atPath:file.path) else {
+            show("Example unavailable", "Reinstall D-Bond from a complete app bundle containing its connector examples.")
+            return
+        }
+        NSWorkspace.shared.activateFileViewerSelecting([file])
+        status.stringValue = "Revealed the bundled Vollna sender example. Connect an existing authenticated watcher and retain its source ledger; D-Bond does not start one."
+    }
+
     private func desktopInstall() {
         // Inspect only the known local MCPB manifest and its enablement field; never read account credentials.
         let root = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/Claude")
@@ -212,7 +331,8 @@ final class AgentSetup: NSObject, NSWindowDelegate {
         } else if fm.fileExists(atPath:file.path) {
             desktopState.stringValue = "Couldn’t verify the local extension."; setAction(desktopAction,"Check Claude settings",enabled:false)
         } else if app == nil {
-            desktopState.stringValue = "Claude Desktop not found."; setAction(desktopAction,"Host unavailable",enabled:false)
+            desktopState.stringValue = "Claude Desktop is not installed. Get the macOS app, then return to install the bundled extension."
+            setAction(desktopAction,"Get Claude Desktop…",enabled:true)
         } else {
             desktopState.stringValue = "D-Bond extension not detected."; setAction(desktopAction,"Open extension installer…",enabled:true)
         }
@@ -255,6 +375,7 @@ final class AgentSetup: NSObject, NSWindowDelegate {
 
     @objc private func checkInstalls() {
         guard !saving, checkTask == nil else { return }
+        refreshHerald()
         for b in [codexAction,claudeAction] { setAction(b,"Checking…",enabled:false) }
         checkAction.isEnabled = false
         desktopInstall()
@@ -272,7 +393,10 @@ final class AgentSetup: NSObject, NSWindowDelegate {
                     (c.directMCP.status == .installed ? "Legacy separate server: " + self.describe(c.directMCP) : "Requires Local Control 0.1.3")
                 self.codexState.stringValue = "Local Control: " + self.describe(c.plugin) + "\nDirect messaging: " + direct
                 self.codexState.toolTip = [c.plugin.source,c.directMCP.source].compactMap{$0}.joined(separator:" · ")
-                if !Self.safeToInstall(c.plugin) {
+                if self.executable("codex") == nil {
+                    self.codexState.stringValue = "Codex is not installed. Get the official app or CLI, then return to install D-Bond tools."
+                    self.setAction(self.codexAction,"Get Codex…",enabled:true)
+                } else if !Self.safeToInstall(c.plugin) {
                     self.setAction(self.codexAction,"Review Codex settings",enabled:false)
                 } else if c.plugin.status == .missing {
                     self.setAction(self.codexAction,"Install Codex tools…",enabled:true)
@@ -287,14 +411,19 @@ final class AgentSetup: NSObject, NSWindowDelegate {
             }
             self.claudeState.stringValue = self.describe(a); self.claudeState.toolTip = a.source
             self.updatingClaude = a.status == .installed && a.updateAvailable
-            switch a.status {
-            case .missing: self.setAction(self.claudeAction,"Install Claude Code plugin…",enabled:true)
-            case .installed where a.enabled == false: self.setAction(self.claudeAction,"Disabled in Claude Code",enabled:false)
-            case .installed where a.updateAvailable && a.source == "Claude Code marketplace: d-bond-local · user":
-                self.setAction(self.claudeAction,"Update Claude Code plugin…",enabled:true)
-            case .installed where a.updateAvailable: self.setAction(self.claudeAction,"Update in Claude Code",enabled:false)
-            case .installed: self.setAction(self.claudeAction,"Already installed",enabled:false)
-            default: self.setAction(self.claudeAction,"Review Claude Code settings",enabled:false)
+            if self.executable("claude") == nil {
+                self.claudeState.stringValue = "Claude Code CLI is not installed. Get it first, then return to install the D-Bond plugin."
+                self.setAction(self.claudeAction,"Get Claude Code…",enabled:true)
+            } else {
+                switch a.status {
+                case .missing: self.setAction(self.claudeAction,"Install Claude Code plugin…",enabled:true)
+                case .installed where a.enabled == false: self.setAction(self.claudeAction,"Disabled in Claude Code",enabled:false)
+                case .installed where a.updateAvailable && a.source == "Claude Code marketplace: d-bond-local · user":
+                    self.setAction(self.claudeAction,"Update Claude Code plugin…",enabled:true)
+                case .installed where a.updateAvailable: self.setAction(self.claudeAction,"Update in Claude Code",enabled:false)
+                case .installed: self.setAction(self.claudeAction,"Already installed",enabled:false)
+                default: self.setAction(self.claudeAction,"Review Claude Code settings",enabled:false)
+                }
             }
         }
     }
@@ -338,6 +467,10 @@ final class AgentSetup: NSObject, NSWindowDelegate {
     }
 
     @objc private func openClaudeDesktop() {
+        if NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.anthropic.claudefordesktop") == nil {
+            openHostPage(ConnectorCatalog.claudeDesktopDownload, name: "Claude Desktop")
+            return
+        }
         guard let file = Bundle.main.url(forResource: "d-bond-claude", withExtension: "mcpb", subdirectory: "agent-installers") else {
             show("Installer unavailable", "The bundled Claude Desktop installer is missing. Reinstall D-Bond from a complete build.")
             return
@@ -356,6 +489,10 @@ final class AgentSetup: NSObject, NSWindowDelegate {
     }
 
     @objc private func installClaudeCode() {
+        if executable("claude") == nil {
+            openHostPage(ConnectorCatalog.claudeCodeSetup, name: "Claude Code")
+            return
+        }
         let update = updatingClaude
         guard let marketplace = Bundle.main.url(forResource: "claude-code-marketplace", withExtension: nil, subdirectory: "agent-installers"),
               let cli = executable("claude") else { show("Installer unavailable", "The packaged plugin or Claude Code CLI is missing."); return }
@@ -391,6 +528,10 @@ final class AgentSetup: NSObject, NSWindowDelegate {
     }
 
     @objc private func installCodex() {
+        if executable("codex") == nil {
+            openHostPage(ConnectorCatalog.codexDownload, name: "Codex")
+            return
+        }
         guard let marketplace = Bundle.main.url(forResource: "codex-marketplace", withExtension: nil, subdirectory: "agent-installers"),
               let launcher = Bundle.main.url(forResource: "launch", withExtension: "sh", subdirectory: "agent-installers/direct-stdio"),
               let cli = executable("codex") else { show("Installer unavailable", "The packaged plugin or Codex CLI is missing."); return }
@@ -472,6 +613,14 @@ final class AgentSetup: NSObject, NSWindowDelegate {
             if FileManager.default.isExecutableFile(atPath: path) { return URL(fileURLWithPath: path) }
         }
         return nil
+    }
+
+    private func openHostPage(_ url: URL, name: String) {
+        guard NSWorkspace.shared.open(url) else {
+            show("Could not open \(name) setup", "Open \(url.absoluteString) in your browser.")
+            return
+        }
+        status.stringValue = "Opened official \(name) setup. Install the host, then choose Check again in D-Bond."
     }
 
     nonisolated private static func execute(_ executable: URL, _ args: [String]) -> Int32 {

@@ -13,7 +13,10 @@ private final class PairingDestinationAction: NSObject {
 @MainActor
 final class MenuController: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
-    private lazy var settings = SettingsWindowController()
+    private let dotConnector = DotConnector()
+    private lazy var settings = SettingsWindowController(connector: dotConnector, onConnectorChanged: { [weak self] in
+        self?.hub?.refreshDotConnector()
+    }, onHTTPSSetup: { DotIngressWindowController.shared.present() }, publicOrigin: { DotIngressController.shared.publicOrigin })
     private var currentMenu: NSMenu?
     private var hub: Hub?
     private var connectionsWindow: ConnectionsWindowController?
@@ -23,6 +26,8 @@ final class MenuController: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.accessory)
         NSApp.applicationIconImage = Brand.app
         installSettingsShortcut()
+        DotIngressController.shared.restoreAtLaunch()
+        dotConnector.onHostRecovered = { [weak self] in self?.hub?.refreshDotConnector() }
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem.button {
             if let url = Bundle.main.url(forResource: "d-bond-menu-icon", withExtension: "svg"),
@@ -43,9 +48,16 @@ final class MenuController: NSObject, NSApplicationDelegate {
             hub = try Hub()
             if let hub { ownerSocket = try? OwnerSocket(hub:hub) }
             refreshMenu()
+            dotConnector.startIfEnabled { [weak self] result in
+                if case .success = result { self?.hub?.refreshDotConnector() }
+            }
             if GeneralPreferences.shouldOpenConnections(isFirstSetup: hub?.snapshot().services.isEmpty == true,
                                                         arguments: CommandLine.arguments) {
                 showConnections()
+            }
+            if hub?.snapshot().services.isEmpty == true && !UserDefaults.standard.bool(forKey: "connectorChoicePresented") {
+                UserDefaults.standard.set(true, forKey: "connectorChoicePresented")
+                DispatchQueue.main.async { [weak self] in self?.chooseInitialConnection() }
             }
         } catch {
             setMenu([NSMenuItem(title: "D-Bond could not start: \(error.localizedDescription)", action: nil, keyEquivalent: ""),
@@ -53,7 +65,31 @@ final class MenuController: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func openAgents() { if let hub { AgentSetup.show(hub:hub) } }
+    @objc private func openAgents() {
+        if let hub {
+            AgentSetup.show(hub: hub, onDotSetup: { [weak self] in self?.settings.presentDotConnector() },
+                            onAddService: { [weak self] in self?.pairDot() })
+        }
+    }
+
+    private func chooseInitialConnection() {
+        let message = Brand.alert()
+        message.messageText = "Connect D-Bond"
+        message.informativeText = "Set up your own Dot connector, connect local agents and services, or continue with local connections. You can change this later in Connectors and Settings."
+        message.addButton(withTitle: "Set Up Dot")
+        message.addButton(withTitle: "Connect Local Agents")
+        message.addButton(withTitle: "Later")
+        switch message.runModal() {
+        case .alertFirstButtonReturn: settings.presentDotConnector()
+        case .alertSecondButtonReturn: openAgents()
+        default: break
+        }
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        dotConnector.shutdown()
+        DotIngressController.shared.shutdown()
+    }
 
     @objc private func toggleMenu() {
         refreshMenu()
@@ -74,6 +110,7 @@ final class MenuController: NSObject, NSApplicationDelegate {
         menu.addItem(disabled("\(total) connections · \(listeners) listening"))
         menu.addItem(.separator())
         menu.addItem(action("Open Connections…", #selector(showConnections)))
+        menu.addItem(action("Connectors…", #selector(openAgents)))
         menu.addItem(.separator())
         menu.addItem(settingsItem())
         menu.addItem(.separator())
@@ -84,12 +121,14 @@ final class MenuController: NSObject, NSApplicationDelegate {
     @objc private func showConnections() {
         guard let hub else {return}
         if connectionsWindow == nil {
-            connectionsWindow = ConnectionsWindowController(hub:hub, onAdd:{ [weak self] in self?.pairDot() }, onSetup: { [weak self] service in self?.showServiceSetup(service) }, onAgents: { [weak self] in self?.openAgents() }, onLog: { [weak self] in self?.showError("Event history", "Open a connection’s Events to inspect its delivery history.") }, onBridge: { [weak self] in self?.checkBridgeStatus() }, onDotSetup: { [weak self] in self?.copyDotSetup() })
+            connectionsWindow = ConnectionsWindowController(hub:hub, onAdd:{ [weak self] in self?.pairDot() }, onSetup: { [weak self] service in self?.showServiceSetup(service) }, onAgents: { [weak self] in self?.openAgents() }, onLog: { [weak self] in self?.showEventsGuide() }, onBridge: { [weak self] in self?.checkBridgeStatus() }, onDotSetup: { [weak self] in self?.copyDotSetup() })
         }
         connectionsWindow?.showWindow()
     }
 
-
+    @objc private func showEventsGuide() {
+        showError("Connection events", "Choose Events next to a connection to inspect its recent messages, delivery receipts and complete history.")
+    }
     func applicationShouldHandleReopen(_ sender:NSApplication,hasVisibleWindows flag:Bool)->Bool {
         showConnections(); return true
     }
@@ -101,23 +140,24 @@ final class MenuController: NSObject, NSApplicationDelegate {
         selection.addButton(withTitle: "Continue")
         selection.addButton(withTitle: "Cancel")
         let preset = NSPopUpButton(frame: NSRect(x: 0, y: 0, width: 320, height: 28), pullsDown: false)
-        preset.addItems(withTitles: ["Generic HTTP producer", "Herald notification", "Local demo echo"])
+        preset.addItems(withTitles: ["Generic HTTP producer", "Vollna job intake", "Herald notification", "Local demo echo"])
         selection.accessoryView = preset
         guard selection.runModal() == .alertFirstButtonReturn else { return }
         let selectedPreset = preset.indexOfSelectedItem
         let defaults: [(String, String, String)] = [
             ("Service", "Messages", "dot"),
+            ("Vollna", "Job intake", "dot"),
             ("Herald", "Notifications", "herald"),
             ("Demo", "Local echo", "demo")
         ]
         let (serviceDefault, topicDefault, destinationDefault) = defaults[selectedPreset]
         let alert = Brand.alert()
         alert.messageText = "Name this connection"
-        alert.informativeText = "Use the name you want to see here and in Dot, such as “Service / Messages”."
+        alert.informativeText = "Use the name you want to see here and in Dot, such as “Vollna / Job intake”."
         alert.addButton(withTitle: "Create Connection")
         alert.addButton(withTitle: "Cancel")
         let field = NSTextField(string: serviceDefault)
-        field.placeholderString = "Service, e.g. My service"
+        field.placeholderString = "Service, e.g. Vollna"
         field.setAccessibilityLabel("Service")
         let topic = NSTextField(string: topicDefault)
         topic.placeholderString = "Topic, e.g. Job intake"
@@ -158,7 +198,7 @@ final class MenuController: NSObject, NSApplicationDelegate {
         let service = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         let subject = topic.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !service.isEmpty, !subject.isEmpty, !service.contains(" / ") else {
-            showError("Enter a service and topic", "For example, use My service for the service and Messages for the topic.")
+            showError("Enter a service and topic", "For example, use Vollna for the service and Job intake for the topic.")
             return
         }
         let name = service + " / " + subject
@@ -216,7 +256,7 @@ final class MenuController: NSObject, NSApplicationDelegate {
     private func showServiceSetup(_ service: ServiceView) {
         let alert = Brand.alert()
         alert.messageText = service.name
-        let preset = 0
+        let preset = service.name.lowercased().hasPrefix("vollna /") ? 1 : 0
         let status = service.paused ? "Paused." : ((service.subscribers + service.directSubscribers) > 0 ? "Paired and listening." : "Paired on this Mac.")
         let instructions = producerInstructions(preset:preset,destination:service.destination)
         alert.informativeText = "\(status)\n\n\(instructions)\n\nLocal endpoint\n\(service.endpoint)"
@@ -236,10 +276,18 @@ final class MenuController: NSObject, NSApplicationDelegate {
         }
     }
 
-
-
     private func producerInstructions(preset: Int, destination: String) -> String {
-        return "Configure your producer with this endpoint and its one-time bearer. POST stable event IDs and read the authenticated return stream for correlated receipts."
+        switch preset {
+        case 1:
+            return "Connect the local Vollna watcher to this endpoint. Each job it sends carries this connection’s saved rules. Open Webhook Log to see incoming job titles, or Events to see whether Dot replied."
+        case 2:
+            return "Herald: send an authenticated JSON event with a title and body. A local Herald acceptance receipt does not prove a banner was displayed."
+        case 3:
+            return "Send an authenticated sample JSON event to this endpoint; the reply is local echo only."
+        default:
+            let route = destination == "dot" ? "Dot" : destination
+            return "Configure the producer to POST unique stable event IDs and JSON payloads to this endpoint with its one-time bearer. On an uncertain POST, retry the same ID and content. Read GET <endpoint>/stream?after=<lastSequence> for correlated receipts and replay. Check the \(route) route separately before calling it live."
+        }
     }
 
     private func copySetup(_ pairing: Pairing) {
@@ -252,7 +300,7 @@ final class MenuController: NSObject, NSApplicationDelegate {
 
     @objc private func copyDotSetup() {
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString("Keep one standing subscription to app.message.created, channel d-bond, with my existing Dot Bridge Transport. Deliver events individually and immediately. Renew automatically if supported and keep it active until I disconnect. Acknowledge each request first and reply through the bridge. Pairing establishes two-way communication for every connected service. Use the D-Bond recipient address for an addressed message and the return address for a question to its sender. Keep payloads out of ordinary chat. Do not use Slack or unsubscribe after answering.",forType:.string)
+        NSPasteboard.general.setString("Keep one standing subscription to app.message.created, channel d-bond, using my connected D-Bond MCP app. Deliver events individually and immediately. Renew automatically if supported and keep it active until I disconnect. Acknowledge each request first and reply through the bridge. Pairing establishes two-way communication for every connected service. Use the D-Bond recipient address for an addressed message and the return address for a question to its sender. Keep payloads out of ordinary chat. Do not use Slack or unsubscribe after answering.",forType:.string)
     }
     @objc private func checkBridgeStatus() {
         guard let hub else { return }

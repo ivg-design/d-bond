@@ -47,7 +47,7 @@ class NativeTest(unittest.TestCase):
                     return Result({'request_id':'req_'+'b'*32})
             client=NativeHTTPFixture()
             result=n.send(client,env,{'blocked':False,'active':1},native,
-                          before_post=lambda:n.record_attempt(attempts,n.idempotency_key(service,env['id']),later))
+                          before_post=lambda:n.record_attempt(attempts,n.idempotency_key(service,env['id']),later,route_root=native.parent))
             self.assertEqual(result['state'],'dot_stored')
             self.assertEqual(client.posts,1)
             self.assertEqual(n.reconcile_before_send(env,native,ledger,now=later+1,attempts_path=attempts,reply_timeout=3600)['reply'],'req_'+'b'*32)
@@ -65,7 +65,7 @@ class NativeTest(unittest.TestCase):
                 db.execute('insert into events values(?,?,?)',(service,env['id'],json.dumps({'state':'dispatching','retrying':True,'stages':[
                     {'state':'queued'},{'state':'dispatching','at':dt.datetime.fromtimestamp(now,dt.timezone.utc).isoformat()},
                     {'state':'queued'},{'state':'dispatching'}]})));db.commit()
-            n.record_attempt(attempts,n.idempotency_key(service,env['id']),now)
+            n.record_attempt(attempts,n.idempotency_key(service,env['id']),now,route_root=native.parent)
             self.assertIsNone(n.reconcile_before_send(env,native,ledger,now=now+3599,attempts_path=attempts,reply_timeout=3600))
             self.assertEqual(n.reconcile_before_send(env,native,ledger,now=now+3600,attempts_path=attempts,reply_timeout=3600)['state'],'dot_quarantined')
     def test_retry_reconciles_native_row_and_quarantines_missing_ambiguous_row(self):
@@ -103,6 +103,23 @@ class NativeTest(unittest.TestCase):
                 db.execute('update events set body=?',(json.dumps(safe),));db.commit()
             self.assertIsNone(n.reconcile_before_send(env,native,ledger,now=now))
 
+    def test_source_expiry_is_distinct_from_unknown_native_delivery(self):
+        service='11111111-1111-4111-8111-111111111111'
+        now=1_800_000_000
+        env={'service':service,'id':'expiry-case','payload':{'kind':'example.item',
+             'timing':{'source_expires_at':dt.datetime.fromtimestamp(now-1,dt.timezone.utc).isoformat()}}}
+        with tempfile.TemporaryDirectory() as td:
+            native=pathlib.Path(td)/'native.sqlite';ledger=pathlib.Path(td)/'ledger.sqlite'
+            with contextlib.closing(sqlite3.connect(native)) as db:
+                db.execute('create table messages(channel,idempotency_key,request_id,reply,reply_cancelled,expires_at,started_at)')
+                db.commit()
+            with contextlib.closing(sqlite3.connect(ledger)) as db:
+                db.execute('create table events(service,id,body)')
+                db.execute('insert into events values(?,?,?)',(service,env['id'],json.dumps({'retrying':False,'stages':[]})))
+                db.commit()
+            receipt=n.reconcile_before_send(env,native,ledger,now=now)
+            self.assertEqual(receipt['state'],'dot_expired')
+            self.assertIn('source expired',receipt['reply'])
 
     def test_known_permanent_post_errors_do_not_raise_for_automatic_retry(self):
         service='11111111-1111-4111-8111-111111111111'
@@ -334,8 +351,8 @@ class NativeTest(unittest.TestCase):
             replay=list(n.deltas(db,set(),[0]))
             self.assertEqual([r['state'] for r in replay],['dot_acknowledged','dot_replied','dot_push','dot_push'])
             # Only an addressed native reply is pushed to its registered target.
-            meta=dict(raw['metadata'],dbond_conversation_route={'delivery':'addressed_reply','recipient_service':s2})
-            db.execute("insert into messages values(?,?,?,?,?,?,?,?,?,?)",(json.dumps(meta),'req_targeted',now,None,'Dot words',0,now+100,'accepted',n.PREFIX+'abc','d-bond'))
+            meta=dict(raw['metadata'],dbond_event='targeted',dbond_conversation_route={'delivery':'addressed_reply','recipient_service':s2})
+            db.execute("insert into messages values(?,?,?,?,?,?,?,?,?,?)",(json.dumps(meta),'req_targeted',now,None,'Dot words',0,now+100,'accepted',n.idempotency_key(s1,'targeted'),'d-bond'))
             for seq,req in [(4,'req_test'),(5,'req_targeted')]:
                 db.execute("insert into received_messages values(?,?,?,?,?,?,?)",(seq,'reply'+str(seq),'reply','d-bond','{}','Dot words',req))
             db.commit()

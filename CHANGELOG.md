@@ -1,9 +1,14 @@
 # Changelog
 
 Versions below refer to the macOS app; connector packages have their own version numbers.
-History before 0.3.10 is reconstructed from source commits and their app version/build
-metadata. Backfilled tags identify the last commit with each version before the next
-version change; they do not certify a preserved historical app binary.
+Historical tags preserve the public source for each app version. Earlier releases provide source archives.
+
+## 0.4.0 — 2026-11-14 · build 14
+
+- Set up the Dot MCP Events host from the Mac app. The app includes the host, Python runtime, durable message store and connector installers.
+- Pair an existing Dot once with a stable HTTPS endpoint. Inspect its subscription and choose the active route in Settings. Existing installations can keep their previous connection during setup.
+- Add a Connectors window for Dot, Herald, Claude, Codex and generic services. It includes a browser messaging example and an optional Vollna sender using your own webhook receiver.
+- Distribute the generic public app and sanitized historical source archives. Keep service-specific configurations and artwork on the owner’s Mac.
 
 ## 0.3.10 — 2026-11-14 · build 13
 
@@ -64,6 +69,7 @@ A durable Codex chat currently needs a loaded Desktop owner for direct delivery.
 - Add paired-session registration, wake checks and a per-chat Codex listener.
 - Show compact two-way event history with local timestamps, message previews and
   access to the complete log.
+- Improve Vollna outcome previews, bounded connection reads, proposal settlement
   labels and generic rule names.
 
 ## 0.3.1 — 2026-11-12 · build 4

@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>D-Bond · Browser transport demo</title>
+<style>
+  :root{color-scheme:dark;font:14px system-ui;background:#151a20;color:#e5e9ee}
+  body{margin:0;padding:20px;max-width:600px}h1{font-size:19px;margin:0 0 8px}p{line-height:1.45;color:#b7c0ca}
+  label{display:block;margin:14px 0 5px}input,textarea,button{box-sizing:border-box;font:inherit}
+  input,textarea{width:100%;background:#222a33;color:#f4f7fa;border:1px solid #53606f;border-radius:5px;padding:9px}
+  textarea{min-height:95px}button{background:#306e91;color:white;border:0;border-radius:5px;padding:9px 12px;margin:10px 6px 0 0;cursor:pointer}
+  button.secondary{background:#34414f}button:disabled{opacity:.5;cursor:default}
+  .card{border:1px solid #3a4653;border-radius:7px;padding:12px;margin:16px 0;background:#1c232b}
+  pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#10151a;padding:8px;border-radius:5px;color:#d6e5ef}
+  #status{min-height:2em;color:#ffd38a}small{color:#b7c0ca}
+</style>
+<h1>D-Bond browser transport demo</h1>
+<p>Optional, standalone browser example. Pair it explicitly with a local named service.</p>
+<section class="card"><label for="endpoint">D-Bond service endpoint</label><input id="endpoint" placeholder="http://127.0.0.1:18768/v1/services/…/events">
+<label for="secret">One-time bearer credential</label><input id="secret" type="password" autocomplete="off" placeholder="Stored in this extension profile only">
+<button id="pair">Save pairing</button><button id="clear" class="secondary">Forget pairing</button></section>
+<section class="card"><label for="payload">Test JSON payload</label><textarea id="payload">{"source":"browser-demo","text":"Hello from the isolated panel"}</textarea>
+<button id="send">Send test event</button><button id="retry" class="secondary">Retry pending IDs</button><p><small>Replies appear while this panel is open. Pending IDs and receipts survive extension restarts.</small></p></section>
+<div id="status" role="status"></div><section class="card"><strong>Pending</strong><pre id="pending">[]</pre><strong>Correlated receipts</strong><pre id="receipts">[]</pre></section>
+<script type="module" src="panel.js"></script></html>

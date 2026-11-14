@@ -87,7 +87,7 @@ final class ConnectionsWindowController: NSObject, NSWindowDelegate {
         let more = NSPopUpButton(frame:.zero,pullsDown:true)
         more.bezelStyle = .rounded
         more.addItem(withTitle:"Bridge Tools")
-        for (name, action) in [("Connection Status…", #selector(openBridge)), ("Copy Dot Setup", #selector(copySetup))] {
+        for (name, action) in [("Webhook Log…", #selector(openLog)), ("Connection Status…", #selector(openBridge)), ("Copy Dot Setup", #selector(copySetup))] {
             let item = NSMenuItem(title:name,action:action,keyEquivalent:""); item.target=self; more.menu?.addItem(item)
         }
         let root = ConnectionsRootView(title: title, subtitle: subtitle, addButton: add, agents:agents, more:more, scrollView: scroll, emptyLabel: empty)

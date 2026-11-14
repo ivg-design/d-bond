@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "D-Bond transport trial",
+  "version": "0.1.0",
+  "description": "Optional generic browser extension demonstrating local D-Bond transport.",
+  "permissions": [
+    "storage",
+    "sidePanel"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "side_panel": {
+    "default_path": "panel.html"
+  },
+  "action": {
+    "default_title": "Open D-Bond transport trial"
+  }
+}

@@ -1488,7 +1488,7 @@ def parser() -> argparse.ArgumentParser:
     enroll.add_argument("alias")
     enroll.add_argument("--name", help="display name shown in the D-Bond menu")
     enroll.add_argument("--chrome-id", help="allow only this Chrome extension origin to use this pairing in a browser")
-    enroll.add_argument("--service", help="application or service, such as Vollna")
+    enroll.add_argument("--service", help="application or service, such as Build monitor")
     enroll.add_argument("--topic", help="chat title or workflow, such as Job intake")
     enroll.add_argument("--client", choices=("claude", "codex"), help="local client identity for the session")
     enroll.add_argument("--session-id", help="exact client session UUID; never inferred from nearby chats")

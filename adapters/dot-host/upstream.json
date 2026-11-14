@@ -1,0 +1,27 @@
+{
+  "repository": "https://github.com/uezo/dots-bridge",
+  "revision": "46010a7bd840ae673cccf432d321e53732243152",
+  "license": "MIT",
+  "files": {
+    "vendor/LICENSE": "ae580313aa7bddb65f1416269498c0d3318c1913bd7367ba8cc96880674a3811",
+    "vendor/pyproject.toml": "40e7845669347ab9b726b9c6af10e0bc1bedb1557b2eb70b4afdb495b5743920",
+    "vendor/dots_bridge/__init__.py": "6e27e18b8aea9580e870480fd18ec8a2c46df7f319feac3bf8ee67462b59012a",
+    "vendor/dots_bridge/__main__.py": "935a1c1166b0c1ea35a82256345000bf2c73ded718d77773bc27a71ecce28f7d",
+    "vendor/dots_bridge/app.py": "d656199cbc34c860e5d12f2ba9947a015740ec2d83c6ea5b91b4e8f7cba069bf",
+    "vendor/dots_bridge/auth.py": "840979ed15b61e421d152cc1639b6b85bf8f62cd3b8639e95e0e5945ac7cb00b",
+    "vendor/dots_bridge/bridge.py": "863320305c8209216dde60ecb3ef05810b7c199c58fc44291920195137a1f443",
+    "vendor/dots_bridge/cli.py": "117f49472e3e7c58151784b789536441b1f7489df24aafb342e6e88e3af40827",
+    "vendor/dots_bridge/client.py": "2de48db3cfd87fbc2e8239325d1af240b69ca5c31de6e73d50480727b7cc7639",
+    "vendor/dots_bridge/config.py": "33c64ca8e2462418fd2dd54d386ed0666208512b4f4c7bc2ea2063fe18c360f0",
+    "vendor/dots_bridge/connectors/__init__.py": "c68071d0dc2311075a7b245963042d7e02de73272593411d0f04ce72dfb746ad",
+    "vendor/dots_bridge/connectors/_openai_protocol.py": "8548c05ab67dfdddcbb95fc9494423f4ee178fe961ac18063da729446761bd1e",
+    "vendor/dots_bridge/connectors/_websocket_push.py": "a3dad9ac8e80271bfc7d27b85d2af5c877839c298581641bdf2c05b1e2bd2694",
+    "vendor/dots_bridge/connectors/openai.py": "ab440e7f9778b5bc27ecd12a768cd139312c15de4fa47cb4ea77889d242fdb91",
+    "vendor/dots_bridge/errors.py": "01c5e14281db61316ad1d9f4e4d4f625cc619dc8e4e5a9516568a68565fda524",
+    "vendor/dots_bridge/mcp.py": "820ad6a233198fa75fbcc6b9ec9323c973f5f167de0ec104608f428d4dcaad21",
+    "vendor/dots_bridge/models.py": "e7671c757ef17a1fbcf97004f7eff956ed8bb17053fa81a37fa842d68c19fcc4",
+    "vendor/dots_bridge/receiver.py": "79912c78d24f87dead687c7a4d2ddcb758c652f08974d04d9b122e7ac06019fe",
+    "vendor/dots_bridge/store.py": "4cd16cb8d6a3971ed0b9125ffa6c3b79670d359e0ef21d78a146685f2036c8f2",
+    "vendor/dots_bridge/webhooks.py": "cce1933ff8fec251d80e4dcedddfc00f3ca497d34f2b9025307caac2011b4722"
+  }
+}

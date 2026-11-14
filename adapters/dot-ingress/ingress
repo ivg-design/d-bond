@@ -1,0 +1,6 @@
+#!/bin/sh
+set -eu
+HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+PYTHON="$HERE/../dot-runtime/python/bin/python3.13"
+if [ ! -x "$PYTHON" ]; then PYTHON=/usr/bin/python3; fi
+exec "$PYTHON" -I -B "$HERE/ingress.py" "$@"

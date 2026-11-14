@@ -51,10 +51,10 @@ def main() -> None:
     manifest = {
         "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
         "name": "d-bond", "version": "0.1.0",
-        "description": "Local D-Bond messaging through an already connected Dot Bridge Transport app.",
+        "description": "Connect Dot to the D-Bond host on your Mac.",
         "extensions": {"com.openai": {"apps": "./.app.json", "interface": {
             "displayName": "D-Bond for Dot", "shortDescription": "Message paired services",
-            "longDescription": "Use an existing, operator-owned Dot Bridge Transport connection to exchange D-Bond messages.",
+            "longDescription": "Exchange messages with paired services using your connected D-Bond MCP app.",
             "developerName": "Local operator", "category": "Other", "capabilities": [],
             "defaultPrompt": "Help me communicate with a paired D-Bond service."}}},
     }

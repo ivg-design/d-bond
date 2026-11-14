@@ -1,0 +1,58 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "dots-bridge"
+version = "0.6.0"
+description = "Use OpenAI dots from your own apps: a bridge with a Python client and an OpenAI-compatible API."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "uezo", email = "uezo@uezo.net" }]
+requires-python = ">=3.11"
+dependencies = [
+  "anyio>=4,<5",
+  "fastmcp>=4.1.3,<5",
+  "mcp>=2.3,<3",
+  "mcp-types>=2.3,<3",
+  "httpx>=0.28,<1",
+  "cryptography>=44",
+  "pydantic>=2.12,<3",
+  "starlette>=1.0.1,<2",
+  "uvicorn>=0.35,<1",
+  "websockets>=15,<18",
+]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Framework :: AsyncIO",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Topic :: Communications",
+]
+
+[project.urls]
+Homepage = "https://github.com/uezo/dots-bridge"
+Repository = "https://github.com/uezo/dots-bridge"
+Issues = "https://github.com/uezo/dots-bridge/issues"
+
+[project.optional-dependencies]
+chat = ["prompt-toolkit>=3.0.43,<4"]
+dev = ["pytest>=8", "pytest-asyncio>=1", "ruff>=0.12", "build>=1.2", "prompt-toolkit>=3.0.43,<4"]
+
+[project.scripts]
+dots-bridge = "dots_bridge.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/dots_bridge"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC"]

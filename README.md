@@ -1,122 +1,60 @@
 # D-Bond
 
-A macOS menu bar bridge for Dot, local services, and individual agent chats.
-Pair services once, send addressed messages, and inspect delivery receipts in one
-place. Direct messages between paired services work independently of Dot.
+D-Bond is a Mac menu bar app that connects Dot, agent chats and local services. Pair a service once, give it a name, and send messages in either direction. The Mac stores connections, rules and delivery history across restarts.
 
-**Version 0.3.10** · [Changelog](CHANGELOG.md) · [All releases](https://github.com/ivg-design/d-bond/releases)
+**Version 0.4.0** · [Download for Apple silicon](https://github.com/ivg-design/d-bond/releases/latest) · [Changelog](CHANGELOG.md)
 
 ## Install
 
-Download **D-Bond-macOS-arm64.zip** from [the latest GitHub Release](https://github.com/ivg-design/d-bond/releases/latest),
-extract it, and move **D-Bond.app** to `~/Applications` before opening it. This
-ZIP targets Apple silicon; build from source for another Mac architecture. The
-release also provides `d-bond-claude.mcpb` and `SHA256SUMS.txt`. The app runs in
-the menu bar; choose **Open Connections…** to get started.
+Download **D-Bond-macOS-arm64.zip**, extract it, and move **D-Bond.app** to Applications. Open the app and choose **Connectors…** in the menu bar. The Apple silicon binary includes the Dot host, Python and the connector installers. It requires macOS 13 or later. The release page lists the signature and notarization status for that download.
 
-Requirements: **macOS 13 or later** and **Python 3.11 or later** for the bundled
-adapters and Dot bridge helper. Install the corresponding Codex or Claude host
-only for the integrations you use. Check the release's architecture before
-installing it; source builds target your Mac. Dragging the app into Applications
-does not install the CLI shortcut or a crash supervisor. **Start at Login** can
-be enabled in the app settings; the source installer below adds supervision
-and the CLI shortcut.
+| Connect | From the app |
+| --- | --- |
+| Dot | Open **Connectors → Configure Dot Connector…**. Set up HTTPS access to your Mac, register your MCP app in ChatGPT, and connect your Dot once. |
+| Herald | Open Herald in **Connectors**. Choose **Install Herald…** to download and open its verified disk image. Drag Herald into Applications, then connect notifications. |
+| Claude | Choose the Desktop extension or Claude Code plugin. Approve the installation in Claude and register the desired chat. |
+| Codex | Install the packaged local tools and register the desired chat. |
+| Another service | Use **Add Connection…** for a named webhook sender, CLI client or browser extension. The app provides the local endpoint and the pairing credential. |
+| Vollna | Use the optional example in **Connectors** with your own account and webhook receiver. The example includes a local preview. [Vollna example](examples/vollna/README.md) |
 
-Current builds are **ad hoc signed and not notarized**. macOS may require approval
-in **System Settings → Privacy & Security** after you first try to open a downloaded
-copy. Approve only a download you trust.
+Open **Connections** to inspect, pause or remove a pairing. Open its rules editor to write the Markdown SOP that accompanies each incoming event. **Events** records request previews, receipts and replies using local display times. **Start D-Bond at login** is available in Settings.
 
-To build and install from source, install Xcode Command Line Tools with Swift
-5.9 or later, ensure `python3` is available, then run:
+## Connect your existing Dot
+
+1. Open Dot setup and choose **Set Up HTTPS Access…**. Use your own stable HTTPS address and reverse proxy, or configure a named Cloudflare tunnel in the app. Route the public hostname to the restricted local ingress at `127.0.0.1:18770`. D-Bond’s service-pairing and owner APIs stay on loopback.
+2. In **Open ChatGPT Plugins**, register your own MCP app at **https://your-host.example/mcp**. Copy the OAuth callback shown by ChatGPT into D-Bond. Configure the host and use **Show OAuth Setup** for its registration and one-time owner consent.
+3. Connect that MCP app to your Dot. Ask Dot once to subscribe to `app.message.created` on channel `d-bond`, acknowledge incoming requests and return replies through the connector. Use **Check Status**, then **Use Built-in** when D-Bond shows one active subscription. The optional private Dot plugin carries more detailed handling instructions. [Dot plugin](adapters/dot/README.md)
+4. Send a question from a paired service. The event history shows when the Mac stored it, when Dot acknowledged it, and when Dot replied. Each service shares the same standing Dot connection.
+
+D-Bond stores the subscription and its signing material locally. An existing installation can keep its older connection while configuring the built-in host. Dot owns its callback registration and expiration. A revoked grant or expired subscription can require action in Dot. The Mac and its HTTPS route must be reachable for cloud-to-Mac calls. [MCP Events](https://developers.openai.com/plugins/build/mcp-events)
+
+## Agent chats
+
+In the desired Codex or Claude chat, say **“Register this session in D-Bond.”** After registration, ask it to message another connection by name. Direct agent-to-agent messages travel through the Mac independently of Dot. Each host determines whether an incoming message can start a turn. A durable Codex cloud chat can remain pending until its desktop owner loads. [Codex listener](adapters/codex-session/README.md)
+
+The bundled CLI and MCP adapters support service enrollment, messaging and receipts. [CLI guide](adapters/cli/README.md) · [Codex](adapters/codex/README.md) · [Claude](adapters/claude/README.md) · [Generic clients](adapters/direct/README.md) · [Browser example](adapters/browser-demo/README.md)
+
+## Build from source
+
+The current packaged runtime targets Apple silicon. To build locally, install Xcode Command Line Tools with Swift 5.9 or later and a build-time Python 3.11 or later.
 
 ```sh
 git clone https://github.com/ivg-design/d-bond.git
 cd d-bond
-bash scripts/install_app.sh
+bash scripts/bundle.sh
 ```
 
-Quit a running D-Bond before upgrading. The source installer builds the app,
-installs it into `~/Applications`, links `~/.local/bin/dbond`, and configures a
-per-user launchd job. Existing pairings and receipts are retained. Remove any
-older duplicate **Open at Login** entry; use D-Bond's Settings to control startup.
-To build the app without installing it, run `bash scripts/bundle.sh`; the result
-is `dist/D-Bond.app`. See the [connection guide](docs/CONNECTIONS.md) for details.
-
-## Connect a service or chat
-
-1. Open **Connections → Add Connection…** and try **Local demo echo**, or configure
-   a service with its loopback endpoint and one-time credential.
-2. Use **Connect agents** to install the appropriate packaged connector. The host
-   still controls its approval and discovery; Codex may require a new chat.
-3. Inside each intended Codex Desktop or Claude Code chat, say **“Register this
-   session in D-Bond.”** Registration addresses that exact chat, rather than every
-   chat in the app. Claude Code may require channel opt-in or a Monitor.
-4. Ask a paired chat to message another connection by its displayed name. Use
-   **Events** to inspect storage, host acceptance, recipient acknowledgment, and
-   replies separately.
-
-You can also install Codex Local Control from this repository:
+The result is `dist/D-Bond.app`. To install into `~/Applications` with a CLI shortcut and per-user crash supervision, quit a running D-Bond and run `bash scripts/install_app.sh`. To reproduce a tagged release, run `bash scripts/package_release.sh v0.4.0`. Its app archive, Claude Desktop extension and SHA-256 checksums go into `dist/releases/v0.4.0/`.
 
 ```sh
-codex plugin marketplace add ivg-design/d-bond
-codex plugin add d-bond-local-control@dbond-github
-```
-
-The [CLI guide](adapters/cli/README.md) covers manual pairing and diagnostics.
-[Codex Local Control](adapters/codex/README.md) provides local connection/rule
-management and messaging. [Claude](adapters/claude/README.md) and
-[generic direct clients](adapters/direct/README.md) have their own setup guides.
-[Vollna sender](examples/vollna/README.md) is an example for an existing receiver;
-creating a pairing does not install those products or change their workflows.
-
-## Dot and delivery limits
-
-To wake **your existing Dot**, separately install and authenticate a compatible
-**Dot Bridge Transport** host with the native `d-bond` channel, loopback API,
-SQLite store, and active subscription. This repository does not supply that
-transport, an account, a Dot app binding, or another person's connected services.
-Its [private plugin packager](adapters/dot/README.md) is for operators who already
-own a working app binding.
-
-The conventional host interpreter is
-`~/Library/Application Support/DotBridge/venv/bin/python`. Set `DBOND_DOT_PYTHON`
-for another interpreter and `DBOND_DOTBRIDGE_DIR` for another directory containing
-`bridge.toml` and `bridge.sqlite3`.
-
-The [Codex listener](adapters/codex-session/README.md) depends on a private,
-version-sensitive Desktop IPC interface. A durable/cloud chat currently needs
-an **open, loaded Desktop owner**. When that owner is unavailable, the listener
-retains the observed event and reports its pending sequence, reason, and local
-owner-availability timestamps. It retries while the message is pending; opening
-the chat may be necessary before delivery can proceed. An idle listener is not
-proof that a closed cloud chat can wake. A Dot-owned task route is **under
-evaluation**, without an accepted closed-chat wake guarantee.
-
-**Stored by D-Bond** means persisted for replay. Host acceptance, agent access,
-a content reply, and completion of requested work are different evidence.
-Account grants, host availability, and computer power state can prevent delivery.
-
-## Develop
-
-```sh
-swift build
 swift test
 swift build -c release --product dbond-probe
 python3 -B -m unittest discover -s Tests
-python3 -m unittest discover -s scripts -p 'test_*.py'
-python3 -m unittest discover -s adapters/cli -p 'test_*.py'
-python3 -m unittest discover -s adapters/codex-session -p 'test_*.py'
+python3 -B -m unittest discover -s adapters/cli
+python3 -B -m unittest discover -s adapters/codex-session
+node adapters/browser-demo/test.mjs
 ```
-
-To reproduce the release files for your Mac's architecture from a tagged revision,
-run `bash scripts/package_release.sh v0.3.10`. Find the app archive, Claude extension,
-and checksums in `dist/releases/v0.3.10/`.
-
-The [marketplace evaluation](docs/MARKETPLACE.md) records a possible future listing;
-this repository is not a submitted public Dot service.
 
 ## License
 
-D-Bond is available under the [MIT License](LICENSE), copyright 2026 IVG Design.
-See [third-party notices](THIRD_PARTY_NOTICES.md) for upstream attribution and
-service artwork rights.
+D-Bond is MIT licensed, copyright 2026 IVG Design. The embedded host, runtime and other dependencies retain their own notices. [MIT license](LICENSE) · [Third-party notices](THIRD_PARTY_NOTICES.md)

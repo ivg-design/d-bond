@@ -1,8 +1,6 @@
 # Private Dot plugin packager
 
-This template binds an **already connected, operator-owned** Dot Bridge Transport
-app. It creates no account, authentication, subscription, hosted endpoint, or
-marketplace eligibility. The source template contains no app identity.
+This optional skill package teaches Dot to acknowledge requests and reply to the correct service. Connect the Mac app’s built-in Dot connector in ChatGPT first. In D-Bond’s Dot settings, choose **Export Dot Plugin…**, select your connected app’s binding file, and choose where to save the private ZIP. The app packages only your binding and the D-Bond skill. The same packager is available from source.
 
 Supply your own local `.app.json` with exactly one identity pair:
 

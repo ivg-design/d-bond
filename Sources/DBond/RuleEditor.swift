@@ -123,6 +123,7 @@ final class RuleEditor: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
         NSLayoutConstraint.activate([
             icon.leadingAnchor.constraint(equalTo:root.leadingAnchor,constant:18), icon.topAnchor.constraint(equalTo:root.topAnchor,constant:12), icon.widthAnchor.constraint(equalToConstant:48), icon.heightAnchor.constraint(equalToConstant:48),
             header.leadingAnchor.constraint(equalTo:icon.trailingAnchor,constant:10), header.centerYAnchor.constraint(equalTo:icon.centerYAnchor), header.trailingAnchor.constraint(lessThanOrEqualTo:root.trailingAnchor,constant:-18),
+            separator.topAnchor.constraint(equalTo:icon.bottomAnchor,constant:12), separator.leadingAnchor.constraint(equalTo:root.leadingAnchor),separator.trailingAnchor.constraint(equalTo:root.trailingAnchor),
             divider.leadingAnchor.constraint(equalTo:root.leadingAnchor,constant:224), divider.widthAnchor.constraint(equalToConstant:1), divider.topAnchor.constraint(equalTo:separator.bottomAnchor), divider.bottomAnchor.constraint(equalTo:foot.topAnchor),
             count.leadingAnchor.constraint(equalTo:root.leadingAnchor,constant:18), count.centerYAnchor.constraint(equalTo:mode.centerYAnchor),
             listScroll.topAnchor.constraint(equalTo:mode.bottomAnchor,constant:10), listScroll.leadingAnchor.constraint(equalTo:root.leadingAnchor,constant:6), listScroll.trailingAnchor.constraint(equalTo:divider.leadingAnchor,constant:-6), listScroll.bottomAnchor.constraint(equalTo:actions.topAnchor,constant:-8),
@@ -141,7 +142,6 @@ final class RuleEditor: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
     }
 
     private func name(_ rule: OwnerRule) -> String {
-
         let lines = rule.text.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in:.whitespacesAndNewlines) }
         if let heading = lines.first(where: { $0.hasPrefix("#") }) {
             let label = String(heading.drop(while: {$0 == "#"})).trimmingCharacters(in:.whitespaces)
@@ -202,8 +202,6 @@ final class RuleEditor: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
         }
     }
     @objc private func switchMode() { refreshMode() }
-
-
 
     @objc private func formatText(_ control: NSButton) {
         guard active != nil, mode.selectedSegment == 0 else { return }
