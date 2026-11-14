@@ -7,6 +7,11 @@ import io
 import json
 import os
 from pathlib import Path
+import select
+import signal
+import socket
+import subprocess
+import sys
 import tarfile
 import tempfile
 import threading
@@ -99,6 +104,57 @@ class ProxyTests(unittest.TestCase):
 
 
 class DownloadTests(unittest.TestCase):
+    @unittest.skipUnless(hasattr(select, "kqueue"), "macOS parent lifetime notification")
+    def test_app_crash_releases_only_its_fixture_proxy_port(self):
+        # An app stub owns the actual ingress helper. Both run in isolated HOME;
+        # override only the bind port to 0 so production18769/18770 are untouched.
+        child_code = '''import json,os,sys
+from pathlib import Path
+sys.path.insert(0,os.environ['QA_INGRESS_MODULE'])
+import ingress
+original=ingress.ThreadingHTTPServer
+created=[]
+def server(address,handler):
+    result=original(('127.0.0.1',0),handler);created.append(result);return result
+ingress.ThreadingHTTPServer=server
+ingress.emit=lambda state: print(json.dumps({'state':state,'port':created[0].server_port}),flush=True)
+ingress.run('https','connector.example.org',Path(os.environ['HOME'])/'ingress')
+'''
+        parent_code = '''import json,os,subprocess,sys,signal
+env=dict(os.environ,DBOND_INGRESS_PARENT_PID=str(os.getpid()))
+child=subprocess.Popen([sys.executable,'-c',os.environ['QA_CHILD_CODE']],env=env,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True)
+row=json.loads(child.stdout.readline());row['pid']=child.pid
+print(json.dumps(row),flush=True)
+signal.pause()
+'''
+        with tempfile.TemporaryDirectory() as root:
+            env = dict(os.environ, HOME=root, QA_INGRESS_MODULE=str(Path(__file__).parent), QA_CHILD_CODE=child_code)
+            parent = subprocess.Popen([sys.executable, "-c", parent_code], env=env, stdout=subprocess.PIPE,
+                                      stderr=subprocess.PIPE, text=True)
+            child_pid = None
+            queue = select.kqueue()
+            try:
+                self.assertTrue(select.select([parent.stdout], [], [], 5)[0], "fixture helper did not start")
+                row = json.loads(parent.stdout.readline())
+                self.assertEqual(row["state"], "restricted_proxy_ready")
+                child_pid, port = row["pid"], row["port"]
+                self.assertNotIn(port, (ingress.PORT, ingress.UPSTREAM_PORT))
+                with socket.create_connection(("127.0.0.1", port), timeout=1): pass
+                queue.control([select.kevent(child_pid, filter=select.KQ_FILTER_PROC,
+                    flags=select.KQ_EV_ADD | select.KQ_EV_ONESHOT, fflags=select.KQ_NOTE_EXIT)], 0, 0)
+                parent.kill(); parent.wait(timeout=2)
+                self.assertTrue(queue.control([], 1, 5), "app crash left its ingress helper alive")
+                with self.assertRaises(OSError): socket.create_connection(("127.0.0.1", port), timeout=1)
+                child_pid = None
+            finally:
+                queue.close()
+                if parent.poll() is None:
+                    parent.kill(); parent.wait(timeout=2)
+                if child_pid:
+                    try: os.kill(child_pid, signal.SIGTERM)
+                    except ProcessLookupError: pass
+                parent.stdout.close(); parent.stderr.close()
+
     def test_tunnel_token_is_inherited_never_argv_or_status(self):
         token = "private-fixture-tunnel-token"
         signals = {}
