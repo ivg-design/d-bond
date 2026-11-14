@@ -16,6 +16,15 @@ Developer ID signing enables hardened runtime and requests Apple's secure
 timestamp. No debug entitlements or library-validation exceptions are added.
 The bundle process runs the embedded runtime smoke check again after signing.
 
+The Claude MCPB builder signs its universal native launcher before creating the
+archive, using the same signing mode. The standalone MCPB and the archive embedded
+in the app are copied from that one signed artifact. Release verification also
+opens embedded MCPB/ZIP archives and verifies every Mach-O slice against the
+outer app's signing team, hardened-runtime setting, and secure timestamp.
+`verify --standalone-mcpb PATH` additionally requires byte-identical standalone
+and embedded archives. Signing the app cannot repair unsigned code inside an
+already-created archive; rebuild the MCPB with the intended signing mode first.
+
 Authenticate an existing notarytool Keychain profile without uploading anything:
 
 ```sh
