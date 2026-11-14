@@ -67,7 +67,7 @@ final class OpenAITunnelSetupWindow: NSWindowController, NSWindowDelegate {
         let title = heading("Connect Dot through OpenAI")
         title.font = .systemFont(ofSize: 20, weight: .semibold)
         let intro = label("D-Bond connects outbound from this Mac. Vollna and other webhook senders still need their own reachable receiving URL.")
-        let icon = NSImageView(image: Brand.app ?? NSImage())
+        let icon = NSImageView(image: Brand.logo ?? NSImage())
         icon.imageScaling = .scaleProportionallyUpOrDown
         icon.widthAnchor.constraint(equalToConstant: 38).isActive = true
         icon.heightAnchor.constraint(equalToConstant: 38).isActive = true

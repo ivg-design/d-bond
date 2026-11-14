@@ -120,7 +120,7 @@ chmod 755 "$AGENT_DIR/direct-stdio/launch.sh"
 install -m 644 "$ROOT/adapters/runtime/python_launch.sh" "$AGENT_DIR/direct-stdio/python-launch.sh"
 swift "$ROOT/scripts/make_app_icon.swift" "$ROOT/Assets/d-bond-app-icon.png" "$icon_dir/D-Bond.iconset"
 iconutil -c icns "$icon_dir/D-Bond.iconset" -o "$RES_DIR/D-Bond.icns"
-install -m 644 "$ROOT/Assets/d-bond-menu-icon.svg" "$RES_DIR/d-bond-menu-icon.svg"
+install -m 644 "$ROOT/Assets/d-bond-menu-icon.svg" "$ROOT/Assets/d-bond-logo.svg" "$RES_DIR/"
 cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -131,8 +131,8 @@ cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
   <key>CFBundleIconFile</key><string>D-Bond.icns</string>
   <key>CFBundleName</key><string>D-Bond</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.5.0</string>
-  <key>CFBundleVersion</key><string>16</string>
+  <key>CFBundleShortVersionString</key><string>0.5.1</string>
+  <key>CFBundleVersion</key><string>17</string>
   <key>LSUIElement</key><true/>
   <key>NSHighResolutionCapable</key><true/>
 </dict>

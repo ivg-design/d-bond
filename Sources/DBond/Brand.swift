@@ -5,10 +5,31 @@ import UniformTypeIdentifiers
 
 @MainActor
 enum Brand {
-    static let app = Bundle.main.url(forResource: "D-Bond", withExtension: "icns").flatMap(NSImage.init(contentsOf:)) ?? NSApp.applicationIconImage
+    static let logo: NSImage? = {
+        guard let url = Bundle.main.url(forResource: "d-bond-logo", withExtension: "svg"),
+              let artwork = NSImage(contentsOf: url), artwork.size.height > 0 else {
+            return NSApp.applicationIconImage
+        }
+        let width: CGFloat = 96
+        let inset: CGFloat = 5
+        let height = (width - 2 * inset) * artwork.size.height / artwork.size.width + 2 * inset
+        let image = NSImage(size: NSSize(width: width, height: height), flipped: false) { rect in
+            // In light windows a graphite backing keeps both pale fills legible.
+            if NSAppearance.currentDrawing().bestMatch(from: [.darkAqua, .aqua]) != .darkAqua {
+                NSColor(srgbRed: 0.18, green: 0.19, blue: 0.20, alpha: 1).setFill()
+                NSBezierPath(roundedRect: rect, xRadius: 0.13 * rect.height, yRadius: 0.13 * rect.height).fill()
+            }
+            let padding = inset * rect.width / width
+            artwork.draw(in: rect.insetBy(dx: padding, dy: padding), from: .zero, operation: .sourceOver, fraction: 1)
+            return true
+        }
+        image.cacheMode = .never
+        image.accessibilityDescription = "D-Bond"
+        return image
+    }()
     static func alert() -> NSAlert {
         let alert = NSAlert()
-        alert.icon = app
+        alert.icon = logo
         return alert
     }
     private static let directory = FileManager.default.homeDirectoryForCurrentUser

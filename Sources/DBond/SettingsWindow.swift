@@ -61,7 +61,7 @@ final class SettingsWindowController: NSWindowController {
         window.center()
 
         let icon = NSImageView()
-        icon.image = Brand.app
+        icon.image = Brand.logo
         icon.imageScaling = .scaleProportionallyUpOrDown
         icon.widthAnchor.constraint(equalToConstant: 48).isActive = true
         icon.heightAnchor.constraint(equalToConstant: 48).isActive = true

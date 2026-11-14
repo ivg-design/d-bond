@@ -231,7 +231,7 @@ private final class ConnectionsRootView: NSView {
         self.scrollView = scrollView
         super.init(frame: NSRect(x: 0, y: 0, width: 820, height: 610))
         autoresizingMask = [.width, .height]
-        icon.image = Brand.app; icon.imageScaling = .scaleProportionallyUpOrDown; addSubview(icon)
+        icon.image = Brand.logo; icon.imageScaling = .scaleProportionallyUpOrDown; addSubview(icon)
         addSubview(agents); addSubview(more)
         addSubview(title)
         addSubview(subtitle)

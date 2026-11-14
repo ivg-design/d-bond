@@ -105,7 +105,7 @@ final class AgentSetup: NSObject, NSWindowDelegate {
     private func buildWindow() {
         let root = AgentSetupRootView()
         let brand = NSImageView()
-        brand.image = Brand.app ?? NSImage(systemSymbolName: "point.3.connected.trianglepath.dotted", accessibilityDescription: "D-Bond")
+        brand.image = Brand.logo ?? NSImage(systemSymbolName: "point.3.connected.trianglepath.dotted", accessibilityDescription: "D-Bond")
         brand.imageScaling = .scaleProportionallyUpOrDown
         brand.translatesAutoresizingMaskIntoConstraints = false
         let title = label("D-Bond · Connectors", size: 19, bold: true)

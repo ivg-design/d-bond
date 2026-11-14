@@ -5,7 +5,10 @@ import DBondCore
 struct PrivateDotFixture {
     @MainActor static func main() throws {
         NSApplication.shared.setActivationPolicy(.accessory)
-        if let source = ProcessInfo.processInfo.environment["DBOND_FIXTURE_ICON"] { NSApp.applicationIconImage = NSImage(contentsOfFile: source) }
+        precondition(Brand.logo?.accessibilityDescription == "D-Bond", "Missing bundled SVG logo")
+        if let appearance = ProcessInfo.processInfo.environment["DBOND_FIXTURE_APPEARANCE"] {
+            NSApp.appearance = NSAppearance(named: NSAppearance.Name(appearance))
+        }
         let root = URL(fileURLWithPath: CommandLine.arguments[1])
         let suite = "dbond-tunnel-ui-" + UUID().uuidString
         let defaults = UserDefaults(suiteName: suite)!

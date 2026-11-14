@@ -54,7 +54,7 @@ final class RuleEditor: NSObject, NSWindowDelegate, NSTableViewDataSource, NSTab
     private func build(_ service: String) {
         let root = NSView()
         window.contentView = root
-        let icon = NSImageView(); icon.image = Brand.app; icon.imageScaling = .scaleProportionallyUpOrDown
+        let icon = NSImageView(); icon.image = Brand.logo; icon.imageScaling = .scaleProportionallyUpOrDown
         let heading = NSTextField(labelWithString: "Connection rules")
         heading.font = .systemFont(ofSize:23,weight:.semibold)
         let subtitle = NSTextField(labelWithString: service); subtitle.textColor = .secondaryLabelColor

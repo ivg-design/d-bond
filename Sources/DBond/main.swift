@@ -28,7 +28,6 @@ final class MenuController: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
-        NSApp.applicationIconImage = Brand.app
         installSettingsShortcut()
         DotIngressController.shared.restoreAtLaunch()
         dotConnector.onHostRecovered = { [weak self] in
@@ -114,8 +113,10 @@ final class MenuController: NSObject, NSApplicationDelegate {
         let snapshot = hub.snapshot()
         let menu = NSMenu()
         let title = disabled("D-Bond · " + GeneralPreferences.versionDescription())
-        title.image = Brand.app?.copy() as? NSImage
-        title.image?.size = NSSize(width:20,height:20)
+        title.image = Brand.logo?.copy() as? NSImage
+        if let image = title.image, image.size.width > 0 {
+            image.size = NSSize(width: 24, height: 24 * image.size.height / image.size.width)
+        }
         menu.addItem(title)
         let total = snapshot.services.count
         let listeners = snapshot.services.filter { !$0.paused && ($0.subscribers + $0.directSubscribers) > 0 }.count

@@ -67,7 +67,7 @@ final class EventLogWindow: NSObject, NSWindowDelegate {
         root.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
         window.contentView = root
         let icon = NSImageView()
-        icon.image = Brand.app
+        icon.image = Brand.logo
         icon.imageScaling = .scaleProportionallyUpOrDown
         let title = NSTextField(labelWithString:"Events · \(service.name)")
         title.font = .systemFont(ofSize:21,weight:.semibold)
