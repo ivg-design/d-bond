@@ -12,6 +12,8 @@ swiftc -parse-as-library -I "$products" \
   "$root/Sources/DBond/Login.swift" \
   "$root/Sources/DBond/SettingsWindow.swift" \
   "$root/Sources/DBond/AgentInstallState.swift" \
+  "$root/Sources/DBond/ConnectorCatalog.swift" \
+  "$root/Sources/DBond/HeraldInstaller.swift" \
   "$root/Sources/DBond/AgentSetup.swift" \
   "$root/scripts/fixtures/agent_setup/main.swift" \
   "$products/DBondCore.o" -o "$scratch/agent-setup-fixture"

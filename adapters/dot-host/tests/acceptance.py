@@ -35,6 +35,8 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 
 ORIGIN = "https://offline.dbond.invalid"
 CALLBACK = "https://offline-callback.dbond.invalid/events"
+TUNNEL_CALLBACK = "https://connectors.api.openai.com/events/offline-fixture"
+TUNNEL_ID = "tunnel_" + "a" * 32
 REDIRECT = "https://chatgpt.com/connector/oauth/offline-fixture"
 SOP = {"version": 1, "rules": [{"id": "synthetic-owner-policy", "text": "Answer this synthetic fixture once and preserve its correlation."}]}
 PAYLOAD = {"kind": "synthetic.question", "text": "What arrives through the offline fixture?", "synthetic": True}
@@ -118,7 +120,7 @@ def child_mode(args):
         original = core.create_app
 
         async def callback(url, body, headers):
-            require(url == CALLBACK, "Fixture attempted an unexpected callback destination")
+            require(url == (TUNNEL_CALLBACK if args.tunnel else CALLBACK), "Fixture attempted an unexpected callback destination")
             async with httpx.AsyncClient(trust_env=False, follow_redirects=False) as client:
                 return await client.post(f"http://127.0.0.1:{args.callback_port}/events", content=body, headers=headers)
 
@@ -126,7 +128,12 @@ def child_mode(args):
             return original(settings, bridge=core.DotInbox(settings, webhook_post=callback))
 
         core.create_app = create
-        host.configure(args.state_dir, ORIGIN, REDIRECT)
+        if args.tunnel:
+            import tunnel
+            tunnel.PORT = args.upstream_port
+            host.configure_tunnel(args.state_dir, TUNNEL_ID)
+        else:
+            host.configure(args.state_dir, ORIGIN, REDIRECT)
         print(json.dumps({"fixture_configured": True}), flush=True)
         host.serve(args.state_dir)
     else:
@@ -240,11 +247,11 @@ def complete_oauth(port, owner_key):
     return json_response(exchanged)["access_token"]
 
 
-def rpc(port, token, method, params):
+def rpc(port, credentials, method, params):
     response = endpoint(port, "POST", "/mcp", {"jsonrpc": "2.0", "id": 1, "method": method,
         "params": {**params, "_meta": {"io.modelcontextprotocol/protocolVersion": "2026-07-28",
                                        "io.modelcontextprotocol/clientCapabilities": {}}}},
-        {"Authorization": "Bearer " + token, "Accept": "application/json, text/event-stream", "MCP-Protocol-Version": "2026-07-28",
+        {**credentials, "Accept": "application/json, text/event-stream", "MCP-Protocol-Version": "2026-07-28",
          "Mcp-Method": method, **({"Mcp-Name": params["name"]} if "name" in params else {})})
     require(response[0] == 200, "Synthetic MCP request rejected: " + method)
     result = json_response(response)
@@ -252,8 +259,8 @@ def rpc(port, token, method, params):
     return result["result"]
 
 
-def tool(port, token, name, arguments):
-    result = rpc(port, token, "tools/call", {"name": name, "arguments": arguments})
+def tool(port, credentials, name, arguments):
+    result = rpc(port, credentials, "tools/call", {"name": name, "arguments": arguments})
     require(result.get("isError") is not True, "Synthetic MCP tool error: " + name)
     if isinstance(result.get("structuredContent"), dict):
         return result["structuredContent"]
@@ -300,7 +307,8 @@ def acceptance(args):
             def launch_host():
                 process = subprocess.Popen([str(runtime), "-I", "-B", str(Path(__file__).resolve()), "--child", "host",
                     "--host-dir", str(host_dir), "--state-dir", str(state), "--port", str(host_port),
-                    "--callback-port", str(callback.server.server_port)], env=environment,
+                    "--callback-port", str(callback.server.server_port), "--upstream-port", str(ingress_port),
+                    *(["--tunnel"] if args.tunnel else [])], env=environment,
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
                 try:
                     wait_for(lambda: endpoint(host_port, "GET", "/health")[0] == 200, "managed temporary host startup")
@@ -310,16 +318,36 @@ def acceptance(args):
                 return process
 
             host_process = launch_host()
-            ingress_process = subprocess.Popen([str(runtime), "-I", "-B", str(Path(__file__).resolve()), "--child", "ingress",
-                "--ingress-dir", str(ingress_dir), "--port", str(ingress_port), "--upstream-port", str(host_port)],
-                env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
-            wait_for(lambda: endpoint(ingress_port, "GET", "/.well-known/oauth-authorization-server")[0] == 200, "restricted temporary ingress startup")
-            require(endpoint(ingress_port, "GET", "/api/host-status")[0] == 404, "Ingress exposed owner API")
+            if args.tunnel:
+                # Use the same credential-file hook as the official client, in a disposable home.
+                credentials = {"X-DBond-Tunnel": (state / "tunnel-ingress.key").read_text().strip(),
+                               "X-DBond-Tunnel-ID": TUNNEL_ID}
+                wait_for(lambda: endpoint(ingress_port, "POST", "/mcp", {})[0] == 401, "protected tunnel listener startup")
+                discovery = rpc(ingress_port, credentials, "server/discover", {})
+                require("events" in discovery.get("capabilities", {}), "Tunnel omitted its Events capability")
+                catalog = rpc(ingress_port, credentials, "tools/list", {})
+                require({"acknowledge_request", "reply_to_app", "send_to_app"}.issubset(
+                    {entry["name"] for entry in catalog["tools"]}), "Tunnel is missing a production Dot tool")
+            else:
+                ingress_process = subprocess.Popen([str(runtime), "-I", "-B", str(Path(__file__).resolve()), "--child", "ingress",
+                    "--ingress-dir", str(ingress_dir), "--port", str(ingress_port), "--upstream-port", str(host_port)],
+                    env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+                wait_for(lambda: endpoint(ingress_port, "GET", "/.well-known/oauth-authorization-server")[0] == 200, "restricted temporary ingress startup")
+                with (state / "bridge.toml").open("rb") as stream:
+                    configuration = tomllib.load(stream)
+                credentials = {"Authorization": "Bearer " + complete_oauth(ingress_port, configuration["owner_key"])}
+            require(endpoint(ingress_port, "GET", "/api/host-status", headers=credentials)[0] == 404, "Ingress exposed owner API")
+            rpc(ingress_port, credentials, "events/subscribe", {"name": "app.message.created", "arguments": {"channel": "d-bond"},
+                "delivery": {"mode": "webhook", "url": TUNNEL_CALLBACK if args.tunnel else CALLBACK, "secret": callback.secret}})
             with (state / "bridge.toml").open("rb") as stream:
-                configuration = tomllib.load(stream)
-            token = complete_oauth(ingress_port, configuration["owner_key"])
-            rpc(ingress_port, token, "events/subscribe", {"name": "app.message.created", "arguments": {"channel": "d-bond"},
-                "delivery": {"mode": "webhook", "url": CALLBACK, "secret": callback.secret}})
+                owner = {"Authorization": "Bearer " + tomllib.load(stream)["api_key"]}
+
+            def verify_subscription():
+                identity = json_response(endpoint(host_port, "GET", "/api/host-status", headers=owner))
+                require(identity["active_subscriptions"] == 1, "Expected one active subscription")
+                require(identity["tunnel_subscribed"] == args.tunnel, "Unexpected subscription transport")
+
+            verify_subscription()
             probe = Probe(probe_binary, ledger_dir, environment)
             pair = probe.command({"op": "pair", "name": "Synthetic offline service", "destination": "dot", "sop": SOP})
             event_id = "synthetic-offline-request"
@@ -341,15 +369,16 @@ def acceptance(args):
             stop(host_process)
             host_process = launch_host()
             probe = Probe(probe_binary, ledger_dir, environment)
-            # The persisted OAuth token and request identity must work after both hosts restart.
-            ack = tool(ingress_port, token, "acknowledge_request", {"request_id": request_id})
+            verify_subscription()
+            # The original credential, subscription and request must survive both restarts.
+            ack = tool(ingress_port, credentials, "acknowledge_request", {"request_id": request_id})
             ack_at = time.monotonic()
             require(ack["metadata"]["data"] == PAYLOAD and ack["metadata"]["dbond_owner_sop"] == SOP, "Simulated Dot did not read the intended context")
-            again = tool(ingress_port, token, "acknowledge_request", {"request_id": request_id})
+            again = tool(ingress_port, credentials, "acknowledge_request", {"request_id": request_id})
             require(again["already_started"] and again["started_at"] == ack["started_at"], "Repeated ACK changed start identity")
-            tool(ingress_port, token, "reply_to_app", {"request_id": request_id, "text": REPLY})
+            tool(ingress_port, credentials, "reply_to_app", {"request_id": request_id, "text": REPLY})
             reply_at = time.monotonic()
-            tool(ingress_port, token, "send_to_app", {"channel": "d-bond", "text": PUSH, "idempotency_key": "synthetic-offline-push",
+            tool(ingress_port, credentials, "send_to_app", {"channel": "d-bond", "text": PUSH, "idempotency_key": "synthetic-offline-push",
                 "metadata": {"recipient_caller_id": "d-bond", "recipient_conversation_id": pair["id"]}})
 
             def completion():
@@ -378,7 +407,9 @@ def acceptance(args):
             require(database_row(state / "bridge.sqlite3", "SELECT count(*) FROM messages")[0] == 1, "Duplicate native message stored")
             require(len(callback.deliveries) == 1 and not callback.failures, "Duplicate or invalid synthetic callback")
             return {"result": "pass", "kind": "synthetic-offline-acceptance", "artifact_version": version,
-                "checks": ["runtime and managed host child", "restricted ingress excludes owner API", "real OAuth consent and persisted grant",
+                "route": "secure-mcp-tunnel" if args.tunnel else "https-oauth",
+                "checks": ["runtime and managed host child", "restricted ingress excludes owner API",
+                    "private upstream credential and discovery" if args.tunnel else "real OAuth consent and persisted grant",
                     "signed callback verification and delivery", "real native_link sender and WAL observer", "frozen payload and owner SOP",
                     "broker and host restart before ACK", "exact correlated reply and addressed push", "restart/retry no duplicate send"],
                 "latency_seconds": {"submit_to_callback": round(callback_at - began, 3), "callback_to_ack_including_restart": round(ack_at - callback_at, 3),
@@ -399,6 +430,7 @@ def acceptance(args):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--tunnel", action="store_true", help="Exercise the packaged secure tunnel ingress")
     parser.add_argument("--app", type=Path)
     parser.add_argument("--probe", type=Path, default=Path(__file__).resolve().parents[3] / ".build/release/dbond-probe")
     parser.add_argument("--child", choices=("host", "ingress"), help=argparse.SUPPRESS)

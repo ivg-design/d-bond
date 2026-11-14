@@ -74,7 +74,7 @@ struct AgentSetupFixture {
         var first: NSWindow?
         for iteration in 0..<4 {
             AgentSetup.show(hub: hub)
-            guard let window = app.windows.first(where: { $0.title.hasSuffix("Agent Setup") }) else {
+            guard let window = app.windows.first(where: { $0.title == "D-Bond · Connectors" }) else {
                 fatalError("Agent Setup window missing at iteration \(iteration)")
             }
             require(window.isVisible, "Agent Setup was not visible after open")

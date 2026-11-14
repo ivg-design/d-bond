@@ -27,7 +27,7 @@ final class DotIngressWindowController: NSWindowController {
         let title = NSTextField(labelWithString: "Make your Dot connector reachable")
         title.font = .systemFont(ofSize: 18, weight: .semibold)
         let introduction = NSTextField(wrappingLabelWithString:
-            "Dot needs a stable public HTTPS address. D-Bond can run a named Cloudflare Tunnel, or use your existing HTTPS service. Local access alone cannot connect Dot.")
+            "For a public HTTPS connector, use a named Cloudflare Tunnel or your existing HTTPS service. Private OpenAI tunnels have their own setup in Settings.")
         mode.addItems(withTitles: ["Cloudflare Tunnel · account and domain required", "My existing HTTPS service"])
         mode.target = self; mode.action = #selector(selectIngressMode)
         mode.identifier = .init("dotIngress.mode")

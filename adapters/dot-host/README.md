@@ -9,7 +9,7 @@ checksums; Python dependencies use `requirements.lock` with `--require-hashes`
 and binary wheels only. An initial source setup needs network access.
 
 The unchanged upstream core is pinned by revision and per-file SHA-256 in
-`upstream.json`. D-Bond additions live in `core.py` and `host.py`; they supply the
+`upstream.json`. D-Bond additions live in `core.py`, `host.py` and `tunnel.py`. They supply the
 explicit ACK and durable single-route behavior. See [upstream notices](UPSTREAM_NOTICE.md).
 
 ## App interface
@@ -24,6 +24,11 @@ migrates or stops the owner's existing DotBridge installation.
   application and storage keys on later calls. Stop the host before changing a
   running endpoint identity. Configuration alone does not change D-Bond's selected
   transport or prove a Dot subscription.
+- `configure-tunnel --tunnel-id ID` prepares the loopback MCP ingress on port 18773. It reuses
+  the owner identity and message database. Re-running setup for the same tunnel keeps its local
+  credential and subscription verification. Selecting a different tunnel rotates the local
+  credential and requires a fresh verified subscription from that tunnel. The existing workflow
+  callback continues to receive events until Dot registers through the new plugin.
 - `status` performs a bounded, authenticated loopback identity check and returns
   safe JSON. It does not provision, install, subscribe or send. `configured`,
   `running`, `subscribed`, `registered`, `public_url`, `redirect_uri`, `mcp_url`,
@@ -43,10 +48,13 @@ migrates or stops the owner's existing DotBridge installation.
 - `provision` is a source-development fallback. A released app uses its bundled
   runtime without creating another environment or invoking pip.
 
-Only public MCP/OAuth routes may be forwarded by D-Bond's ingress layer. Keep
-all `/api/*` owner endpoints private. A reachable HTTPS MCP origin, registered
-plugin/app identity, OAuth consent and a Dot-created event subscription are
-separate requirements. A local host cannot manufacture those cloud grants.
+The public HTTPS ingress forwards MCP and OAuth routes. OpenAI Secure MCP Tunnel
+forwards only `POST /mcp` to a second loopback listener. The official client
+supplies a local upstream credential and authenticates to OpenAI using a separate
+runtime key. The app reports `identity.tunnel_listening` and
+`identity.tunnel_subscribed` separately so an existing HTTPS subscription cannot
+confirm a tunnel cutover. Both transports keep the local owner API private. See
+the [Dot setup instructions](../../README.md#connect-your-existing-dot).
 
 ## Compatibility and storage
 
@@ -70,6 +78,10 @@ Run the isolated checks using the bundled interpreter:
 ```sh
 /path/to/Resources/dot-runtime/python/bin/python3.13 -I -B adapters/dot-host/test_host.py
 ```
+
+The release packager also runs `tests/acceptance.py` against the bundled app
+and Swift probe for HTTPS and `--tunnel`. Each route must deliver a signed
+event and recover the correlated reply and addressed push after a restart.
 
 The checks use disposable stores, an in-process MCP/HTTP server and signed mock
 callbacks. They cover ACK/reply/push, restart, callback replacement, authentication

@@ -23,7 +23,7 @@ install -m 644 "$ROOT/LICENSE" "$ROOT/THIRD_PARTY_NOTICES.md" "$RES_DIR/"
 cp "$ROOT/scripts/native_link.py" "$RES_DIR/"
 python3 "$ROOT/scripts/package_dot_runtime.py" --output "$RES_DIR/dot-runtime"
 mkdir -p "$RES_DIR/dot-host" "$RES_DIR/dot-plugin"
-for name in connector provision core.py host.py requirements.lock upstream.json UPSTREAM_NOTICE.md; do
+for name in connector provision core.py host.py tunnel.py requirements.lock upstream.json UPSTREAM_NOTICE.md; do
   cp -p "$ROOT/adapters/dot-host/$name" "$RES_DIR/dot-host/"
 done
 ditto "$ROOT/adapters/dot-host/vendor" "$RES_DIR/dot-host/vendor"
@@ -131,8 +131,8 @@ cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
   <key>CFBundleIconFile</key><string>D-Bond.icns</string>
   <key>CFBundleName</key><string>D-Bond</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.4.1</string>
-  <key>CFBundleVersion</key><string>15</string>
+  <key>CFBundleShortVersionString</key><string>0.5.0</string>
+  <key>CFBundleVersion</key><string>16</string>
   <key>LSUIElement</key><true/>
   <key>NSHighResolutionCapable</key><true/>
 </dict>

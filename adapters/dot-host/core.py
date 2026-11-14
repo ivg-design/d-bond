@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextvars import ContextVar
 import hashlib
 import hmac
 import json
@@ -9,6 +10,7 @@ import os
 import secrets
 import time
 from uuid import uuid4
+from urllib.parse import urlsplit
 
 import httpx
 from dots_bridge.app import create_app as upstream_app
@@ -23,6 +25,7 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 CHANNEL = "d-bond"
+TUNNEL_REQUEST = ContextVar("dbond_tunnel_request", default=None)
 
 
 class InboxStore(Store):
@@ -63,13 +66,22 @@ class InboxStore(Store):
 
     async def save_subscription(self, sub):
         encrypted = self.cipher.encrypt(json.dumps(sub["destination"]).encode())
+        binding = TUNNEL_REQUEST.get()
+        tunnel_id = sub["id"] if binding else ""
         def save(db):
             db.execute("BEGIN IMMEDIATE")
+            if binding:
+                from tunnel import current_binding
+                if current_binding(self.path.parent) != binding:
+                    raise BridgeError("tunnel_replaced", "The selected tunnel changed.", 409)
             # One owner, one channel, one active callback. A replacement is a transport rebind.
             db.execute("DELETE FROM subscriptions WHERE owner=? AND channel=? AND id<>?", (sub["owner"], CHANNEL, sub["id"]))
             db.execute("INSERT INTO subscriptions VALUES (?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET "
                        "destination=excluded.destination,expires_at=excluded.expires_at,verified_at=excluded.verified_at",
                        (sub["id"], sub["owner"], CHANNEL, encrypted, sub["expires_at"], sub["verified_at"]))
+            # Store attribution and the verified callback in one transaction, including renewals.
+            db.execute("INSERT OR REPLACE INTO dbond_host VALUES ('tunnel_subscription',?)", (tunnel_id,))
+            db.execute("INSERT OR REPLACE INTO dbond_host VALUES ('tunnel_generation',?)", (binding.generation if binding else "",))
         await self.run(save)
 
     async def revoke_subscriptions(self, owner):
@@ -95,6 +107,18 @@ class DotInbox(DotsBridge):
             self._wake.set()
             return result
 
+    async def tunnel_subscribed(self):
+        from tunnel import current_binding
+        selected = current_binding(self.settings.db_path.parent)
+        if selected is None:
+            return False
+        await self.initialize()
+        return await self.store.run(lambda db: db.execute(
+            "SELECT 1 FROM subscriptions s JOIN dbond_host h ON h.key='tunnel_subscription' AND h.value=s.id "
+            "JOIN dbond_host g ON g.key='tunnel_generation' AND g.value=? "
+            "WHERE s.owner=? AND s.channel=? AND s.expires_at>? AND s.verified_at>0 LIMIT 1",
+            (selected.generation, self.owner_user_id, CHANNEL, time.time())).fetchone() is not None)
+
     async def unsubscribe(self, params, owner):
         async with self._grant_lock:
             return await super().unsubscribe(params, owner)
@@ -112,6 +136,10 @@ class DotInbox(DotsBridge):
         # A missing channel never silently selects another inbox.
         params = {**params, "arguments": params.get("arguments") or {"channel": CHANNEL}}
         result = super()._subscription_args(params, owner)
+        if TUNNEL_REQUEST.get():
+            from tunnel import CALLBACK_HOST
+            if urlsplit(result[2]["url"]).hostname != CALLBACK_HOST:
+                raise BridgeError("invalid_callback", "Use the OpenAI MCP Events callback for this tunnel.")
         if result[1] != CHANNEL:
             raise BridgeError("invalid_channel", "D-Bond supports only its d-bond channel.")
         return result
@@ -239,19 +267,23 @@ class DotInbox(DotsBridge):
         return True
 
 
-def create_app(settings, *, bridge=None, start_worker=True):
-    bridge = bridge or DotInbox(settings)
-    app = upstream_app(settings, bridge=bridge, start_worker=start_worker)
-    mcp = app.state.mcp
-
-    @mcp.tool(auth=require_scopes("messages:reply"), annotations={"idempotentHint": True, "readOnlyHint": False},
-              meta={"securitySchemes": [{"type": "oauth2", "scopes": ["messages:reply"]}]})
+def add_acknowledgement_tool(mcp, bridge, *, oauth):
+    @mcp.tool(auth=require_scopes("messages:reply") if oauth else None, annotations={"idempotentHint": True, "readOnlyHint": False},
+              meta={"securitySchemes": [{"type": "oauth2", "scopes": ["messages:reply"]}] if oauth else [{"type": "noauth"}]})
     async def acknowledge_request(request_id: str):
         """Acknowledge this exact request before working; repeated ACKs preserve its start time."""
         try:
             return await bridge.acknowledge_request(request_id)
         except BridgeError as exc:
             raise ToolError(f"{exc.code}: {exc.message}") from None
+
+
+def create_app(settings, *, bridge=None, start_worker=True):
+    bridge = bridge or DotInbox(settings)
+    app = upstream_app(settings, bridge=bridge, start_worker=start_worker)
+    mcp = app.state.mcp
+
+    add_acknowledgement_tool(mcp, bridge, oauth=True)
 
     # Replace just the local compatibility/status routes; all MCP and OAuth stay upstream-owned.
     def local_authorize(request):
@@ -266,8 +298,13 @@ def create_app(settings, *, bridge=None, start_worker=True):
     async def identity(request):
         local_authorize(request)
         active = await bridge.list_subscriptions()
+        served = getattr(app.state, "tunnel_binding", None)
+        from tunnel import current_binding
+        listening = getattr(app.state, "tunnel_listening", False) and served == current_binding(settings.db_path.parent)
         return JSONResponse({"host": "d-bond-dot-host/1", "store_id": settings.owner_user_id, "pid": os.getpid(),
-                             "active_subscriptions": len(active), "subscribed": len(active) == 1})
+                             "active_subscriptions": len(active), "subscribed": len(active) == 1,
+                             "tunnel_listening": listening, "tunnel_id": served.tunnel_id if served else "",
+                             "tunnel_subscribed": bool(listening and await bridge.tunnel_subscribed())})
 
     async def stop(request):
         local_authorize(request)

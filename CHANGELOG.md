@@ -3,6 +3,11 @@
 Versions below refer to the macOS app; connector packages have their own version numbers.
 Historical tags preserve the public source for each app version. Earlier releases provide source archives.
 
+## 0.5.0 — 2026-11-14 · build 16
+
+- Connect a private ChatGPT workspace to the Mac through OpenAI Secure MCP Tunnel. Dot can wake, acknowledge requests and return replies without a public hostname or a Cloudflare account.
+- Reuse the saved tunnel configuration after restarting D-Bond. The wizard shows the tunnel connection and Dot’s subscription separately.
+
 ## 0.4.1 — 2026-11-14 · build 15
 
 - Separate agent chats, the shared Dot connection and workflow services in Connections. Removal and stop prompts explain what will stop working and how to restore it.

@@ -20,6 +20,18 @@ esac
 git -C "$root" archive "$ref" | tar -x -C "$stage/source"
 DBOND_BUNDLE_ID=design.ivg.dbond bash "$stage/source/scripts/bundle.sh"
 app="$stage/source/dist/D-Bond.app"
+
+# Run both Dot transports from the same committed archive and packaged runtime.
+acceptance="$stage/source/adapters/dot-host/tests/acceptance.py"
+if [[ -f "$acceptance" ]]; then
+  swift build --package-path "$stage/source" -c release --product dbond-probe
+  products="$(swift build --package-path "$stage/source" -c release --show-bin-path)"
+  python="$app/Contents/Resources/dot-runtime/python/bin/python3.13"
+  "$python" -I -B "$acceptance" --app "$app" --probe "$products/dbond-probe"
+  if [[ -f "$stage/source/adapters/dot-host/tunnel.py" ]]; then
+    "$python" -I -B "$acceptance" --app "$app" --probe "$products/dbond-probe" --tunnel
+  fi
+fi
 if [[ "${DBOND_NOTARIZE:-0}" == 1 ]]; then
   approved_digest="$(python3 "$stage/source/scripts/release_sign.py" fingerprint --app "$app")"
   python3 "$stage/source/scripts/release_sign.py" notarize --app "$app" \

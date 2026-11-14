@@ -14,9 +14,13 @@ private final class PairingDestinationAction: NSObject {
 final class MenuController: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private let dotConnector = DotConnector()
+    private let tunnelRuntime = OpenAITunnelRuntime()
+    private lazy var privateTunnel = OpenAITunnelSetupWindow(connector: dotConnector, runtime: tunnelRuntime) { [weak self] in
+        self?.hub?.refreshDotConnector()
+    }
     private lazy var settings = SettingsWindowController(connector: dotConnector, onConnectorChanged: { [weak self] in
         self?.hub?.refreshDotConnector()
-    }, onHTTPSSetup: { DotIngressWindowController.shared.present() }, publicOrigin: { DotIngressController.shared.publicOrigin })
+    }, onHTTPSSetup: { DotIngressWindowController.shared.present() }, onTunnelSetup: { [weak self] in self?.privateTunnel.present() }, publicOrigin: { DotIngressController.shared.publicOrigin })
     private var currentMenu: NSMenu?
     private var hub: Hub?
     private var connectionsWindow: ConnectionsWindowController?
@@ -27,7 +31,11 @@ final class MenuController: NSObject, NSApplicationDelegate {
         NSApp.applicationIconImage = Brand.app
         installSettingsShortcut()
         DotIngressController.shared.restoreAtLaunch()
-        dotConnector.onHostRecovered = { [weak self] in self?.hub?.refreshDotConnector() }
+        dotConnector.onHostRecovered = { [weak self] in
+            guard let self else { return }
+            self.hub?.refreshDotConnector()
+            if self.tunnelRuntime.enabled && !self.tunnelRuntime.running { self.tunnelRuntime.restoreAtLaunch() }
+        }
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem.button {
             if let url = Bundle.main.url(forResource: "d-bond-menu-icon", withExtension: "svg"),
@@ -49,7 +57,10 @@ final class MenuController: NSObject, NSApplicationDelegate {
             if let hub { ownerSocket = try? OwnerSocket(hub:hub) }
             refreshMenu()
             dotConnector.startIfEnabled { [weak self] result in
-                if case .success = result { self?.hub?.refreshDotConnector() }
+                if case .success(let state) = result {
+                    self?.hub?.refreshDotConnector()
+                    if let self, state.servesTunnel(self.tunnelRuntime.tunnelID) { self.tunnelRuntime.restoreAtLaunch() }
+                }
             }
             if GeneralPreferences.shouldOpenConnections(isFirstSetup: hub?.snapshot().services.isEmpty == true,
                                                         arguments: CommandLine.arguments) {
@@ -87,6 +98,7 @@ final class MenuController: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        tunnelRuntime.shutdown()
         dotConnector.shutdown()
         DotIngressController.shared.shutdown()
     }

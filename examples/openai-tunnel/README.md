@@ -2,6 +2,8 @@
 
 This example tests whether an existing Dot can receive two independent D-Bond requests across a restart. A temporary Swift broker pairs one synthetic service and sends its requests through D-Bond’s native Dot host. The second message uses the same service and Dot subscription. No production job, subscription or pairing participates. OpenAI’s tunnel serves private ChatGPT connectors. A third party such as Vollna needs its own webhook destination. [OpenAI Secure MCP Tunnel](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels)
 
+For everyday use, open **Settings → OpenAI private tunnel…** in D-Bond. The steps below reproduce the isolated two-message experiment. [Set up the production connector](../../README.md#connect-your-existing-dot)
+
 ## Run with your Dot
 
 1. On the Mac, install D-Bond with its embedded Dot runtime, check out the matching repository and run `swift build --product dbond-probe` in the repository root. Install OpenAI’s `tunnel-client`. In Platform tunnel settings, create or reuse a **dedicated private test tunnel** associated with Dot’s workspace. You need its ID and a restricted runtime key with **Tunnels Read and Use**. Keep the key on the Mac. [OpenAI tunnel setup and permissions](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels)

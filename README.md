@@ -2,7 +2,7 @@
 
 D-Bond is a Mac menu bar app that connects Dot, agent chats and local services. Pair a service once, give it a name, and send messages in either direction. The Mac stores connections, rules and delivery history across restarts.
 
-**Version 0.4.1** · [Download for Apple silicon](https://github.com/ivg-design/d-bond/releases/latest) · [Changelog](CHANGELOG.md)
+**Version 0.5.0** · [Download for Apple silicon](https://github.com/ivg-design/d-bond/releases/latest) · [Changelog](CHANGELOG.md)
 
 ## Install
 
@@ -10,7 +10,7 @@ Download **D-Bond-macOS-arm64.zip**, extract it, and move **D-Bond.app** to Appl
 
 | Connect | From the app |
 | --- | --- |
-| Dot | Open **Connectors → Configure Dot Connector…**. Set up HTTPS access to your Mac, register your MCP app in ChatGPT, and connect your Dot once. |
+| Dot | Open **Connectors → Configure Dot Connector…** and choose **OpenAI private tunnel…** or **Set up public HTTPS…**. Register the connector in ChatGPT and connect your existing Dot once. |
 | Herald | Open Herald in **Connectors**. Choose **Install Herald…** to download and open its verified disk image. Drag Herald into Applications, then connect notifications. |
 | Claude | Choose the Desktop extension or Claude Code plugin. Approve the installation in Claude and register the desired chat. |
 | Codex | Install the packaged local tools and register the desired chat. |
@@ -21,14 +21,21 @@ Open **Connections** to see **Dot**, **Workflow services** and **Agent sessions*
 
 ## Connect your existing Dot
 
-1. Open Dot setup and choose **Set Up HTTPS Access…**. Use your own stable HTTPS address and reverse proxy, or configure a named Cloudflare tunnel in the app. Route the public hostname to the restricted local ingress at `127.0.0.1:18770`. D-Bond’s service-pairing and owner APIs stay on loopback.
-2. In **Open ChatGPT Plugins**, register your own MCP app at **https://your-host.example/mcp**. Copy the OAuth callback shown by ChatGPT into D-Bond. Configure the host and use **Show OAuth Setup** for its registration and one-time owner consent.
-3. Connect that MCP app to your Dot. Ask Dot once to subscribe to `app.message.created` on channel `d-bond`, acknowledge incoming requests and return replies through the connector. Use **Check Status**, then **Use Built-in** when D-Bond shows one active subscription. The optional private Dot plugin carries more detailed handling instructions. [Dot plugin](adapters/dot/README.md)
-4. Send a question from a paired service. The event history shows when the Mac stored it, when Dot acknowledged it, and when Dot replied. Each service shares the same standing Dot connection.
+In **Settings → OpenAI private tunnel…**, set up OpenAI Secure MCP Tunnel for your Dot’s workspace. The Mac opens an outbound connection to OpenAI. You can use it without a domain, router changes or Cloudflare.
 
-OpenAI Secure MCP Tunnel is being evaluated separately for private workspaces. The public setup wizard uses the verified HTTPS route described above. Vollna and other third-party webhook senders still need a reachable receiving URL of their own. [How Secure MCP Tunnel works](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels)
+1. Create a dedicated tunnel in OpenAI Platform and select the ChatGPT workspace that contains your Dot. Create a restricted runtime key with **Tunnels → Read and Use**. If prompted, use **Install OpenAI client…** in the wizard. Enter the tunnel ID and key, then choose **Save & Start**. D-Bond keeps the runtime key in your login Keychain. [OpenAI tunnel setup](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels)
+2. In **ChatGPT → Plugins → Add → Add custom MCP server**, give the connector a memorable name, choose **Tunnel**, select the same tunnel and choose **No authentication**. Connect the plugin. Keep this connector private to its owner. Anyone who can use it can act as that D-Bond owner, including reading requests and sending messages to paired services.
+3. Choose **Copy Dot setup message** and send it once in your existing Dot chat. The example below assumes you named the plugin D-Bond. Return to the wizard, choose **Check connection**, then **Use for Dot workflows** when the subscription is verified. One subscription serves all paired services.
 
-D-Bond stores the subscription and its signing material locally. An existing installation can keep its older connection while configuring the built-in host. Dot owns its callback registration and expiration. A revoked grant or expired subscription can require action in Dot. The Mac and its HTTPS route must be reachable for cloud-to-Mac calls. [MCP Events](https://developers.openai.com/plugins/build/mcp-events)
+   > Use my private D-Bond plugin to subscribe to `app.message.created` on channel `d-bond`. Keep the subscription active. When a message arrives, acknowledge the request, read its instructions, and return the answer to the sending service through the same plugin.
+
+4. Send a question from one paired service. In **Events**, check for Dot’s ACK and the answer received by the service. Enable **Start D-Bond at login** to restore the local connection when you sign in to your Mac. Revoked or expired credentials need renewal. [MCP Events](https://developers.openai.com/plugins/build/mcp-events)
+
+For the **public HTTPS** option, forward your hostname to the restricted ingress at `127.0.0.1:18770` using your reverse proxy or a named Cloudflare tunnel. Register the public `/mcp` URL in ChatGPT, copy the OAuth callback into D-Bond, then complete owner consent in **Show OAuth Setup**. Subscribe your existing Dot as in step 3. The optional private Dot plugin supplies detailed message-handling instructions. [Dot plugin](adapters/dot/README.md)
+
+A live two-message test with an existing Dot measured 20.9 seconds to its first ACK and 14.9 seconds after restarting the Mac tunnel client, Dot host and D-Bond broker. The sending service received both exact replies using the original subscription. [Reproduce the restart test](examples/openai-tunnel/README.md)
+
+Vollna and other webhook senders use a separate receiving address. Their local receiver forwards each event through the same D-Bond connection to Dot. [Vollna intake](examples/vollna/README.md)
 
 ## Agent chats
 
@@ -48,7 +55,7 @@ cd d-bond
 bash scripts/bundle.sh
 ```
 
-The result is `dist/D-Bond.app`. To install into `~/Applications` with a CLI shortcut and per-user crash supervision, quit a running D-Bond and run `bash scripts/install_app.sh`. To reproduce a tagged release, run `bash scripts/package_release.sh v0.4.1`. Its app archive, Claude Desktop extension and SHA-256 checksums go into `dist/releases/v0.4.1/`.
+The result is `dist/D-Bond.app`. To install into `~/Applications` with a CLI shortcut and per-user crash supervision, quit a running D-Bond and run `bash scripts/install_app.sh`. To reproduce a tagged release, run `bash scripts/package_release.sh v0.5.0`. Its app archive, Claude Desktop extension and SHA-256 checksums go into `dist/releases/v0.5.0/`.
 
 ```sh
 swift test

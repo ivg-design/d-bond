@@ -14,7 +14,7 @@ if [ -x "$HERE/../dot-runtime/python/bin/python3.13" ]; then
 fi
 if [ ! -x "$PYTHON" ]; then
   case "$COMMAND" in
-    configure|provision) "$HERE/provision" "$STATE" ;;
+    configure|configure-tunnel|provision) "$HERE/provision" "$STATE" ;;
     *) printf '%s\n' '{"configured":false,"running":false,"subscribed":false,"public_url":"","redirect_uri":"","mcp_url":"","route":"owned","identity":{"connected":false,"active_subscriptions":0},"state":"not_configured","reason":"runtime_not_provisioned"}'; exit 0 ;;
   esac
 fi

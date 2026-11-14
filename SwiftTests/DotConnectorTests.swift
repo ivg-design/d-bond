@@ -19,22 +19,33 @@ final class DotConnectorTests: XCTestCase {
         XCTAssertTrue(try JSONDecoder().decode(DotConnectorStatus.self, from: Data(ready.utf8)).canSelectOwnedRoute)
     }
 
-    private func fixture() throws -> (URL, DotConnector, UserDefaults) {
+    private func fixture(recoveryDelay: TimeInterval = 2) throws -> (URL, DotConnector, UserDefaults) {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let executable = root.appendingPathComponent("connector")
         let script = #"""
         #!/usr/bin/python3
         import argparse,json,os,pathlib,signal,sys,time
-        p=argparse.ArgumentParser();p.add_argument('--state-dir');p.add_argument('action');p.add_argument('--public-url');p.add_argument('--redirect-uri');a=p.parse_args()
+        p=argparse.ArgumentParser();p.add_argument('--state-dir');p.add_argument('action');p.add_argument('--public-url');p.add_argument('--redirect-uri');p.add_argument('--tunnel-id');a=p.parse_args()
         root=pathlib.Path(a.state_dir);root.mkdir(exist_ok=True)
         with (root/'calls').open('a') as f:f.write(a.action+'\n')
         configured=root/'configured';running=root/'running';ready=root/'ready'
+        if a.action=='status' and (root/'bad-config').exists():
+            print(json.dumps(dict(configured=False,running=False,subscribed=False,state='blocked',reason='TOMLDecodeError')))
+            sys.exit(1)
+        if a.action=='status' and (root/'fail-first-status').exists():
+            (root/'fail-first-status').unlink();sys.exit(1)
         if a.action=='configure':configured.write_text('yes')
+        if a.action=='configure-tunnel':
+            configured.write_text('yes');(root/'tunnel').write_text(a.tunnel_id)
         if a.action=='serve':
+            budget=root/'failed-starts-left'
+            if budget.exists() and int(budget.read_text())>0:
+                budget.write_text(str(int(budget.read_text())-1));sys.exit(1)
             running.write_text(str(os.getpid()))
+            if (root/'tunnel').exists():(root/'listening').write_text((root/'tunnel').read_text())
             def stop(*_):
-                running.unlink(missing_ok=True);sys.exit(0)
+                running.unlink(missing_ok=True);(root/'listening').unlink(missing_ok=True);sys.exit(0)
             signal.signal(signal.SIGTERM,stop)
             while True:time.sleep(.05)
         if a.action=='stop' and running.exists():
@@ -43,12 +54,12 @@ final class DotConnectorTests: XCTestCase {
         if running.exists():
             try:os.kill(int(running.read_text()),0);alive=True
             except (ProcessLookupError,ValueError):pass
-        print(json.dumps(dict(configured=configured.exists(),running=alive,pid=int(running.read_text()) if alive else None,subscribed=ready.exists(),identity=dict(connected=ready.exists(),active_subscriptions=1 if ready.exists() else 0))))
+        print(json.dumps(dict(configured=configured.exists(),tunnel_configured=(root/'tunnel').exists(),tunnel_id=(root/'tunnel').read_text() if (root/'tunnel').exists() else None,running=alive,pid=int(running.read_text()) if alive else None,subscribed=ready.exists(),identity=dict(connected=ready.exists(),tunnel_id=(root/'listening').read_text() if (root/'listening').exists() else None,tunnel_listening=alive and (root/'listening').exists(),tunnel_subscribed=alive and (root/'listening').exists() and (root/'tunnel-subscriber').exists() and (root/'tunnel-subscriber').read_text()==(root/'listening').read_text(),active_subscriptions=1 if ready.exists() else 0))))
         """#
         try script.write(to: executable, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
         let defaults = UserDefaults(suiteName: "dbond-test-" + root.lastPathComponent)!
-        let connector = DotConnector(executable: executable, stateDirectory: root, routeURL: root.appendingPathComponent("route.json"), defaults: defaults)
+        let connector = DotConnector(executable: executable, stateDirectory: root, routeURL: root.appendingPathComponent("route.json"), defaults: defaults, recoveryDelay: recoveryDelay)
         addTeardownBlock { defaults.removePersistentDomain(forName: "dbond-test-" + root.lastPathComponent) }
         return (root, connector, defaults)
     }
@@ -83,6 +94,41 @@ final class DotConnectorTests: XCTestCase {
         XCTAssertFalse(try result(connector.stop).running)
         XCTAssertFalse(defaults.bool(forKey: DotConnector.enabledPreference))
         XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("route.json").path))
+    }
+
+    func testPrivateTunnelFirstSetupAndExplicitRouteSelection() throws {
+        let (root, connector, _) = try fixture()
+        defer { connector.shutdown(); try? FileManager.default.removeItem(at: root) }
+        let first = try result { connector.configureTunnel(tunnelID: "tunnel_fixtureA", completion: $0) }
+        XCTAssertTrue(first.running)
+        XCTAssertEqual(first.identity?.tunnelListening, true)
+        XCTAssertFalse(first.canSelectTunnelRoute("tunnel_fixtureA"))
+        XCTAssertEqual(connector.selectedRoute, "legacy")
+        try Data().write(to: root.appendingPathComponent("ready"))
+        XCTAssertThrowsError(try result { connector.selectRoute("owned", requireTunnelID: "tunnel_fixtureA", completion: $0) })
+        XCTAssertEqual(connector.selectedRoute, "legacy")
+        try Data("tunnel_fixtureA".utf8).write(to: root.appendingPathComponent("tunnel-subscriber"))
+        XCTAssertTrue(try result { connector.selectRoute("owned", requireTunnelID: "tunnel_fixtureA", completion: $0) }.canSelectTunnelRoute("tunnel_fixtureA"))
+        XCTAssertEqual(connector.selectedRoute, "owned")
+        let switched = try result { connector.configureTunnel(tunnelID: "tunnel_fixtureB", completion: $0) }
+        XCTAssertTrue(switched.servesTunnel("tunnel_fixtureB"))
+        XCTAssertFalse(switched.canSelectTunnelRoute("tunnel_fixtureA"))
+        XCTAssertFalse(switched.canSelectTunnelRoute("tunnel_fixtureB"))
+        XCTAssertThrowsError(try result { connector.selectRoute("owned", requireTunnelID: "tunnel_fixtureB", completion: $0) })
+    }
+
+    func testAddingTunnelToExistingHostRetainsActiveHTTPSRoute() throws {
+        let (root, connector, _) = try fixture()
+        defer { connector.shutdown(); try? FileManager.default.removeItem(at: root) }
+        let initial = try result { connector.configure(publicURL: "https://example.com", redirectURI: "https://chatgpt.com/callback", completion: $0) }
+        try Data().write(to: root.appendingPathComponent("ready"))
+        _ = try result { connector.selectRoute("owned", completion: $0) }
+        let privateListener = try result { connector.configureTunnel(tunnelID: "tunnel_fixtureA", completion: $0) }
+        XCTAssertNotEqual(initial.pid, privateListener.pid)
+        XCTAssertTrue(privateListener.subscribed)
+        XCTAssertFalse(privateListener.canSelectTunnelRoute("tunnel_fixtureA"))
+        XCTAssertEqual(connector.selectedRoute, "owned")
+        XCTAssertEqual(try result { connector.configureTunnel(tunnelID: "tunnel_fixtureA", completion: $0) }.pid, privateListener.pid, "Existing tunnel listener should be reused")
     }
 
     func testRestartedAppReusesAndStopsVerifiedExistingHost() throws {
@@ -180,6 +226,44 @@ final class DotConnectorTests: XCTestCase {
         XCTAssertEqual(calls.filter { $0 == "serve" }.count, 2)
         XCTAssertEqual(connector.selectedRoute, "legacy")
         _ = try result(connector.stop)
+    }
+
+    func testEnabledLaunchRecoversFromStatusFailureAndSixConsecutiveHostExits() throws {
+        let (root, connector, defaults) = try fixture(recoveryDelay: 0.01)
+        defer { connector.shutdown(); try? FileManager.default.removeItem(at: root) }
+        defaults.set(true, forKey: DotConnector.enabledPreference)
+        try Data().write(to: root.appendingPathComponent("configured"))
+        try Data().write(to: root.appendingPathComponent("fail-first-status"))
+        try Data("6".utf8).write(to: root.appendingPathComponent("failed-starts-left"))
+        let recovered = expectation(description: "host eventually ready with original configuration")
+        connector.onHostRecovered = { recovered.fulfill() }
+        XCTAssertThrowsError(try result(connector.startIfEnabled))
+        wait(for: [recovered], timeout: 15)
+        _ = try result(connector.stop)
+        let calls = try String(contentsOf: root.appendingPathComponent("calls"), encoding: .utf8).split(separator: "\n")
+        XCTAssertEqual(calls.filter { $0 == "serve" }.count, 7)
+        XCTAssertFalse(calls.contains("configure"))
+        XCTAssertEqual(connector.selectedRoute, "legacy")
+    }
+
+    func testManualStopCancelsPendingRecoveryAndBrokenSetupStaysStopped() throws {
+        let (root, connector, defaults) = try fixture(recoveryDelay: 0.5)
+        defer { connector.shutdown(); try? FileManager.default.removeItem(at: root) }
+        defaults.set(true, forKey: DotConnector.enabledPreference)
+        try Data().write(to: root.appendingPathComponent("configured"))
+        try Data().write(to: root.appendingPathComponent("fail-first-status"))
+        XCTAssertThrowsError(try result(connector.startIfEnabled))
+        _ = try result(connector.stop)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.65))
+        defaults.set(true, forKey: DotConnector.enabledPreference)
+        try Data().write(to: root.appendingPathComponent("bad-config"))
+        XCTAssertThrowsError(try result(connector.startIfEnabled)) { error in
+            XCTAssertEqual(error as? DotConnectorError, .invalidConfiguration)
+        }
+        let calls = try String(contentsOf: root.appendingPathComponent("calls"), encoding: .utf8)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.65))
+        XCTAssertEqual(try String(contentsOf: root.appendingPathComponent("calls"), encoding: .utf8), calls)
+        XCTAssertFalse(calls.contains("serve"))
     }
 
     func testRouteSelectionRequiresVerifiedIdentityAndCanRevert() throws {

@@ -11,16 +11,32 @@ public struct DotConnectorStatus: Decodable, Equatable {
     public var state: String?
     public var reason: String?
     public var pid: Int?
+    public var tunnelConfigured: Bool?
+    public var tunnelID: String?
     public var identity: Identity?
     public struct Identity: Decodable, Equatable {
         public var connected: Bool
         public var activeSubscriptions: Int
-        enum CodingKeys: String, CodingKey { case connected; case activeSubscriptions = "active_subscriptions" }
+        public var tunnelID: String?
+        public var tunnelListening: Bool?
+        public var tunnelSubscribed: Bool?
+        enum CodingKeys: String, CodingKey {
+            case connected
+            case tunnelID = "tunnel_id", activeSubscriptions = "active_subscriptions", tunnelListening = "tunnel_listening", tunnelSubscribed = "tunnel_subscribed"
+        }
     }
     enum CodingKeys: String, CodingKey {
         case configured, running, subscribed, state, reason, identity, pid
-        case publicURL = "public_url", redirectURI = "redirect_uri", mcpURL = "mcp_url"
+        case publicURL = "public_url", redirectURI = "redirect_uri", mcpURL = "mcp_url", tunnelConfigured = "tunnel_configured", tunnelID = "tunnel_id"
     }
+    public func servesTunnel(_ id: String) -> Bool {
+        !id.isEmpty && id == tunnelID && id == identity?.tunnelID && tunnelConfigured == true && identity?.tunnelListening == true
+    }
+
+    public func canSelectTunnelRoute(_ id: String) -> Bool {
+        canSelectOwnedRoute && servesTunnel(id) && identity?.tunnelSubscribed == true
+    }
+
     public var canSelectOwnedRoute: Bool {
         configured && running && subscribed && identity?.connected == true && identity?.activeSubscriptions == 1
     }
@@ -35,11 +51,12 @@ public struct DotConnectorSetup: Decodable {
 }
 
 public enum DotConnectorError: LocalizedError {
-    case unavailable, invalidURL, commandFailed, timeout, unverifiedIdentity, stopExternalHost, pluginExportFailed
+    case unavailable, invalidURL, invalidConfiguration, commandFailed, timeout, unverifiedIdentity, stopExternalHost, pluginExportFailed
     public var errorDescription: String? {
         switch self {
         case .unavailable: return "The bundled Dot connector is unavailable. Reinstall a complete D-Bond build."
         case .invalidURL: return "Enter a public HTTPS origin and the HTTPS OAuth redirect URL from your app setup."
+        case .invalidConfiguration: return "The saved Dot connector configuration needs repair. Open Dot setup to correct it."
         case .commandFailed: return "The Dot connector could not complete this action. Check its setup and try again."
         case .timeout: return "The Dot connector did not finish in time. Inspect its status before retrying."
         case .unverifiedIdentity: return "Connect your Dot and verify exactly one active d-bond subscription before selecting this route."
@@ -74,7 +91,10 @@ public final class DotConnector: @unchecked Sendable {
     private let queue = DispatchQueue(label: "design.ivg.dbond.dot-connector")
     private let processLock = NSLock()
     private var ownedChild: Process?
-    private var recoveryAttempts = 0
+    private let initialRecoveryDelay: TimeInterval
+    private var nextRecoveryDelay: TimeInterval
+    private var recovery: DispatchWorkItem?
+    private var readySince: Date?
     private var watchedHost: DispatchSourceProcess?
     private var observedHostPID: Int?
     private var watchedPID: Int? {
@@ -94,11 +114,14 @@ public final class DotConnector: @unchecked Sendable {
 
     public init(executable: URL? = DotConnector.defaultExecutable,
                 stateDirectory: URL = DotConnector.supportDirectory.appendingPathComponent("Dot Connector", isDirectory: true),
-                routeURL: URL = DotConnector.routeFile, defaults: UserDefaults = .standard) {
+                routeURL: URL = DotConnector.routeFile, defaults: UserDefaults = .standard,
+                recoveryDelay: TimeInterval = 2) {
         self.executable = executable
         self.stateDirectory = stateDirectory
         self.routeURL = routeURL
         self.defaults = defaults
+        initialRecoveryDelay = max(0.01, min(30, recoveryDelay))
+        nextRecoveryDelay = initialRecoveryDelay
     }
 
     public static func validSetup(publicURL: String, redirectURI: String) -> Bool {
@@ -134,7 +157,15 @@ public final class DotConnector: @unchecked Sendable {
             throw DotConnectorError.timeout
         }
         let data = output.fileHandleForReading.readDataToEndOfFile()
-        guard process.terminationStatus == 0, data.count <= 65_536 else { throw DotConnectorError.commandFailed }
+        guard data.count <= 65_536 else { throw DotConnectorError.commandFailed }
+        if process.terminationStatus != 0 {
+            if arguments == ["status"], let status = try? JSONDecoder().decode(DotConnectorStatus.self, from: data),
+               status.state == "blocked", let reason = status.reason,
+               ["ValueError", "ValidationError", "TOMLDecodeError", "PermissionError"].contains(reason) {
+                throw DotConnectorError.invalidConfiguration
+            }
+            throw DotConnectorError.commandFailed
+        }
         return data
     }
 
@@ -144,9 +175,10 @@ public final class DotConnector: @unchecked Sendable {
         return status
     }
 
-    private func startHost() throws -> DotConnectorStatus {
+    private func startHost(enableIfConfigured: Bool) throws -> DotConnectorStatus {
         var status = try command(["status"])
         guard status.configured else { return status }
+        if enableIfConfigured { defaults.set(true, forKey: Self.enabledPreference) }
         if status.running {
             if child == nil { watchExistingHost(status) }
             return status
@@ -199,20 +231,46 @@ public final class DotConnector: @unchecked Sendable {
         scheduleRecovery()
     }
 
+    private func resetRecovery() {
+        recovery?.cancel()
+        recovery = nil
+        nextRecoveryDelay = initialRecoveryDelay
+        readySince = nil
+    }
+
+    private func startWithRecovery(enableIfConfigured: Bool = false) throws -> DotConnectorStatus {
+        do {
+            let status = try startHost(enableIfConfigured: enableIfConfigured)
+            if status.running { readySince = Date() }
+            return status
+        } catch DotConnectorError.unavailable {
+            throw DotConnectorError.unavailable
+        } catch DotConnectorError.invalidConfiguration {
+            throw DotConnectorError.invalidConfiguration
+        } catch {
+            scheduleRecovery()
+            throw error
+        }
+    }
+
     private func scheduleRecovery() {
-        guard !shuttingDown, defaults.bool(forKey: Self.enabledPreference), recoveryAttempts < 5 else { return }
-        recoveryAttempts += 1
-        let delay = min(30.0, pow(2.0, Double(recoveryAttempts)))
-        queue.asyncAfter(deadline: .now() + delay) {
-            guard !self.shuttingDown, self.child == nil, self.defaults.bool(forKey: Self.enabledPreference) else { return }
-            do {
-                let status = try self.startHost()
-                if status.running { DispatchQueue.main.async { self.onHostRecovered?() } }
-            } catch {
-                // A child that exited has its own termination callback; missing
-                // configuration/runtime requires an explicit new setup attempt.
+        guard !shuttingDown, defaults.bool(forKey: Self.enabledPreference), recovery == nil else { return }
+        if let readySince, Date().timeIntervalSince(readySince) >= 30 { nextRecoveryDelay = initialRecoveryDelay }
+        readySince = nil
+        let delay = nextRecoveryDelay
+        nextRecoveryDelay = min(30, delay * 2)
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.recovery = nil
+            guard !self.shuttingDown, self.defaults.bool(forKey: Self.enabledPreference) else { return }
+            // Recheck identity even if the previous launch took longer to become
+            // ready. startHost reuses that process and never spawns a second one.
+            if let status = try? self.startWithRecovery(), status.running {
+                DispatchQueue.main.async { self.onHostRecovered?() }
             }
         }
+        recovery = work
+        queue.asyncAfter(deadline: .now() + delay, execute: work)
     }
 
     private func perform<T>(_ action: @escaping () throws -> T,
@@ -268,44 +326,64 @@ public final class DotConnector: @unchecked Sendable {
             // Configuration explicitly starts this owned host for subscription
             // setup, but does not migrate or select the existing legacy route.
             self.defaults.set(true, forKey: Self.enabledPreference)
-            self.recoveryAttempts = 0
-            return try self.startHost()
+            self.resetRecovery()
+            return try self.startWithRecovery()
+        }, completion: completion)
+    }
+
+    /// Adds a private listener to the existing store and keeps the selected workflow route.
+    public func configureTunnel(tunnelID: String, completion: @escaping (Result<DotConnectorStatus, Error>) -> Void) {
+        perform({
+            guard tunnelID.range(of: "^tunnel_[A-Za-z0-9_-]{6,160}$", options: .regularExpression) != nil else { throw DotConnectorError.commandFailed }
+            let prepared = try self.command(["configure-tunnel", "--tunnel-id", tunnelID], timeout: 300)
+            guard prepared.tunnelConfigured == true, prepared.tunnelID == tunnelID else { throw DotConnectorError.commandFailed }
+            self.defaults.set(true, forKey: Self.enabledPreference)
+            if prepared.running && !prepared.servesTunnel(tunnelID) {
+                try self.stopHost()
+            }
+            self.resetRecovery()
+            let running = try self.startWithRecovery()
+            guard running.servesTunnel(tunnelID) else { throw DotConnectorError.commandFailed }
+            return running
         }, completion: completion)
     }
 
     public func start(completion: @escaping (Result<DotConnectorStatus, Error>) -> Void) {
         perform({
-            self.recoveryAttempts = 0
-            let status = try self.startHost()
-            if status.configured { self.defaults.set(true, forKey: Self.enabledPreference) }
-            return status
+            self.resetRecovery()
+            return try self.startWithRecovery(enableIfConfigured: true)
         }, completion: completion)
     }
 
     public func startIfEnabled(completion: @escaping (Result<DotConnectorStatus, Error>) -> Void) {
         guard defaults.bool(forKey: Self.enabledPreference) else { return }
-        perform({ try self.startHost() }, completion: completion)
+        perform({ try self.startWithRecovery() }, completion: completion)
     }
 
     public func stop(completion: @escaping (Result<DotConnectorStatus, Error>) -> Void) {
         perform({
             self.defaults.set(false, forKey: Self.enabledPreference)
-            self.watchedHost?.cancel()
-            self.watchedHost = nil
-            self.watchedPID = nil
-            if let child = self.child {
-                if child.isRunning { child.terminate(); child.waitUntilExit() }
-                self.child = nil
-            } else if try self.command(["status"]).running {
-                _ = try self.command(["stop"])
-                for _ in 0..<20 {
-                    let status = try self.command(["status"])
-                    if !status.running { return status }
-                    Thread.sleep(forTimeInterval: 0.1)
-                }
-            }
+            self.resetRecovery()
+            try self.stopHost()
             return try self.command(["status"])
         }, completion: completion)
+    }
+
+    private func stopHost() throws {
+        watchedHost?.cancel()
+        watchedHost = nil
+        watchedPID = nil
+        if let child {
+            self.child = nil
+            if child.isRunning { child.terminate(); child.waitUntilExit() }
+        } else if try command(["status"]).running {
+            _ = try command(["stop"])
+            for _ in 0..<20 {
+                if try !command(["status"]).running { return }
+                Thread.sleep(forTimeInterval: 0.1)
+            }
+            throw DotConnectorError.timeout
+        }
     }
 
     private static var unavailableStatus: DotConnectorStatus {
@@ -314,14 +392,14 @@ public final class DotConnector: @unchecked Sendable {
         DotConnectorStatus(configured: false, running: false, subscribed: false)
     }
 
-    public func selectRoute(_ route: String, completion: @escaping (Result<DotConnectorStatus, Error>) -> Void) {
+    public func selectRoute(_ route: String, requireTunnelID: String? = nil, completion: @escaping (Result<DotConnectorStatus, Error>) -> Void) {
         perform({
             let status: DotConnectorStatus
             if route == "legacy" {
                 status = (try? self.command(["status"])) ?? Self.unavailableStatus
             } else {
                 status = try self.command(["status"])
-                guard route == "owned" && status.canSelectOwnedRoute else { throw DotConnectorError.unverifiedIdentity }
+                guard route == "owned", requireTunnelID.map(status.canSelectTunnelRoute) ?? status.canSelectOwnedRoute else { throw DotConnectorError.unverifiedIdentity }
             }
             try FileManager.default.createDirectory(at: self.routeURL.deletingLastPathComponent(), withIntermediateDirectories: true,
                                                     attributes: [.posixPermissions: 0o700])
