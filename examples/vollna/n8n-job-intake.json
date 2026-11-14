@@ -1,0 +1,87 @@
+{
+  "name": "Vollna jobs to D-Bond",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "vollna-jobs",
+        "authentication": "basicAuth",
+        "responseMode": "lastNode",
+        "responseData": "noData",
+        "options": {}
+      },
+      "name": "Receive job notification",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        0
+      ],
+      "id": "4eab1931-bd54-473b-9128-132d1732cc25",
+      "webhookId": "32263c4e-5f24-4cb1-9c69-3cbfc0e4ba35"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const batch = $input.first().json.body;\nif (!Array.isArray(batch?.projects) || batch.projects.length === 0) {\n  throw new Error('Expected a Vollna job notification with at least one project. Check the selected filters.');\n}\n\nfunction jobId(raw) {\n  if (typeof raw !== 'string') throw new Error('Project has no posting URL.');\n  let link = raw;\n  if (/^https:\\/\\/(?:www\\.)?vollna\\.com\\/go\\?/i.test(raw)) {\n    const target = raw.match(/[?&]url=([^&#]+)/i);\n    if (!target) throw new Error('The tracked job link has no destination.');\n    link = target[1];\n    for (let pass = 0; pass < 3 && !/^https:\\/\\//i.test(link); pass++) link = decodeURIComponent(link);\n  }\n  const match = link.match(/^https:\\/\\/(?:www\\.)?upwork\\.com\\/jobs\\/(?:[^/?#]*_)?(?:~|%7e)([a-z0-9]+)\\/?(?:[?#].*)?$/i);\n  if (!match) throw new Error('Cannot identify an Upwork job. Keep the delivery for inspection.');\n  return '~' + match[1];\n}\n\nfunction sorted(value) {\n  if (Array.isArray(value)) return value.map(sorted);\n  if (value && typeof value === 'object') {\n    return Object.fromEntries(Object.keys(value).sort().map(key => [key, sorted(value[key])]));\n  }\n  return value;\n}\n\nreturn batch.projects.map(project => {\n  if (typeof project?.title !== 'string' || !project.title.trim()) throw new Error('A project has no title.');\n  const id = jobId(project.url);\n  const job = {...project, url: 'https://www.upwork.com/jobs/' + id};\n  // A notification can report the same posting under a different set of filters.\n  delete job.filters;\n  const canonical = sorted(job);\n  return {json: {jobId: id, job: canonical, revisionInput: JSON.stringify(canonical)}};\n});"
+      },
+      "name": "Read each Upwork project",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        260,
+        0
+      ],
+      "id": "7aa85fc7-e623-42a9-9af2-63aa11006a7d"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:18768/v1/services/REPLACE_WITH_PAIRING_ID/events",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { id: \"vollna-\" + JSON.stringify([\"vollna\", $json.jobId, $json.revisionInput.hash(\"sha256\")]).hash(\"sha256\"), payload: {kind: \"job.received\", job_id: $json.jobId, revision: $json.revisionInput.hash(\"sha256\"), job: $json.job} } }}",
+        "options": {}
+      },
+      "name": "Store in D-Bond",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        520,
+        0
+      ],
+      "id": "fc53601c-cd7a-4c02-8bef-4b52b30bd91a"
+    }
+  ],
+  "connections": {
+    "Receive job notification": {
+      "main": [
+        [
+          {
+            "node": "Read each Upwork project",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read each Upwork project": {
+      "main": [
+        [
+          {
+            "node": "Store in D-Bond",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "all"
+  }
+}

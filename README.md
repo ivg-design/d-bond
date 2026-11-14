@@ -2,7 +2,7 @@
 
 D-Bond is a Mac menu bar app that connects Dot, agent chats and local services. Pair a service once, give it a name, and send messages in either direction. The Mac stores connections, rules and delivery history across restarts.
 
-**Version 0.4.0** · [Download for Apple silicon](https://github.com/ivg-design/d-bond/releases/latest) · [Changelog](CHANGELOG.md)
+**Version 0.4.1** · [Download for Apple silicon](https://github.com/ivg-design/d-bond/releases/latest) · [Changelog](CHANGELOG.md)
 
 ## Install
 
@@ -17,7 +17,7 @@ Download **D-Bond-macOS-arm64.zip**, extract it, and move **D-Bond.app** to Appl
 | Another service | Use **Add Connection…** for a named webhook sender, CLI client or browser extension. The app provides the local endpoint and the pairing credential. |
 | Vollna | Use the optional example in **Connectors** with your own account and webhook receiver. The example includes a local preview. [Vollna example](examples/vollna/README.md) |
 
-Open **Connections** to inspect, pause or remove a pairing. Open its rules editor to write the Markdown SOP that accompanies each incoming event. **Events** records request previews, receipts and replies using local display times. **Start D-Bond at login** is available in Settings.
+Open **Connections** to see **Dot**, **Workflow services** and **Agent sessions**. Each removal prompt explains how to recover that connection. Use **Pause** when you want to keep its address, rules and history. Open its rules editor to write the Markdown SOP that accompanies each incoming event. **Events** records request previews, receipts and replies using local display times. **Start D-Bond at login** is available in Settings.
 
 ## Connect your existing Dot
 
@@ -26,11 +26,15 @@ Open **Connections** to inspect, pause or remove a pairing. Open its rules edito
 3. Connect that MCP app to your Dot. Ask Dot once to subscribe to `app.message.created` on channel `d-bond`, acknowledge incoming requests and return replies through the connector. Use **Check Status**, then **Use Built-in** when D-Bond shows one active subscription. The optional private Dot plugin carries more detailed handling instructions. [Dot plugin](adapters/dot/README.md)
 4. Send a question from a paired service. The event history shows when the Mac stored it, when Dot acknowledged it, and when Dot replied. Each service shares the same standing Dot connection.
 
+OpenAI Secure MCP Tunnel is being evaluated separately for private workspaces. The public setup wizard uses the verified HTTPS route described above. Vollna and other third-party webhook senders still need a reachable receiving URL of their own. [How Secure MCP Tunnel works](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels)
+
 D-Bond stores the subscription and its signing material locally. An existing installation can keep its older connection while configuring the built-in host. Dot owns its callback registration and expiration. A revoked grant or expired subscription can require action in Dot. The Mac and its HTTPS route must be reachable for cloud-to-Mac calls. [MCP Events](https://developers.openai.com/plugins/build/mcp-events)
 
 ## Agent chats
 
 In the desired Codex or Claude chat, say **“Register this session in D-Bond.”** After registration, ask it to message another connection by name. Direct agent-to-agent messages travel through the Mac independently of Dot. Each host determines whether an incoming message can start a turn. A durable Codex cloud chat can remain pending until its desktop owner loads. [Codex listener](adapters/codex-session/README.md)
+
+For two chats running inside the local Backplane UI, see the [Backplane direct relay example](examples/backplane/README.md). It targets the exact Backplane thread and provider.
 
 The bundled CLI and MCP adapters support service enrollment, messaging and receipts. [CLI guide](adapters/cli/README.md) · [Codex](adapters/codex/README.md) · [Claude](adapters/claude/README.md) · [Generic clients](adapters/direct/README.md) · [Browser example](adapters/browser-demo/README.md)
 
@@ -44,7 +48,7 @@ cd d-bond
 bash scripts/bundle.sh
 ```
 
-The result is `dist/D-Bond.app`. To install into `~/Applications` with a CLI shortcut and per-user crash supervision, quit a running D-Bond and run `bash scripts/install_app.sh`. To reproduce a tagged release, run `bash scripts/package_release.sh v0.4.0`. Its app archive, Claude Desktop extension and SHA-256 checksums go into `dist/releases/v0.4.0/`.
+The result is `dist/D-Bond.app`. To install into `~/Applications` with a CLI shortcut and per-user crash supervision, quit a running D-Bond and run `bash scripts/install_app.sh`. To reproduce a tagged release, run `bash scripts/package_release.sh v0.4.1`. Its app archive, Claude Desktop extension and SHA-256 checksums go into `dist/releases/v0.4.1/`.
 
 ```sh
 swift test

@@ -35,7 +35,15 @@ install -m 644 "$ROOT/adapters/cli/dbond.py" "$RES_DIR/dbond.py"
 cat > "$RES_DIR/dbond" <<'SH'
 #!/bin/sh
 set -eu
-HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+entry=$0
+while [ -L "$entry" ]; do
+  target=$(/usr/bin/readlink "$entry")
+  case "$target" in
+    /*) entry=$target ;;
+    *) entry=$(dirname -- "$entry")/$target ;;
+  esac
+done
+HERE=$(CDPATH= cd -- "$(dirname -- "$entry")" && pwd -P)
 exec /bin/sh "$HERE/agent-installers/python-launch.sh" "$HERE/dbond.py" "$@"
 SH
 chmod 755 "$RES_DIR/dbond"
@@ -56,7 +64,8 @@ mkdir -p "$AGENT_DIR/claude-code-marketplace/.claude-plugin" \
   "$AGENT_DIR/direct-stdio/adapters/cli"
 install -m 644 "$ROOT/adapters/runtime/python_launch.sh" "$AGENT_DIR/python-launch.sh"
 mkdir -p "$AGENT_DIR/examples/vollna" "$AGENT_DIR/adapters/cli"
-install -m 644 "$ROOT/examples/vollna/forward_job.py" "$ROOT/examples/vollna/README.md" "$AGENT_DIR/examples/vollna/"
+install -m 644 "$ROOT/examples/vollna/forward_job.py" "$ROOT/examples/vollna/README.md" \
+  "$ROOT/examples/vollna/n8n-job-intake.json" "$AGENT_DIR/examples/vollna/"
 cat > "$AGENT_DIR/examples/vollna/forward-job" <<'SH'
 #!/bin/sh
 set -eu
@@ -120,8 +129,8 @@ cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
   <key>CFBundleIconFile</key><string>D-Bond.icns</string>
   <key>CFBundleName</key><string>D-Bond</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.4.0</string>
-  <key>CFBundleVersion</key><string>14</string>
+  <key>CFBundleShortVersionString</key><string>0.4.1</string>
+  <key>CFBundleVersion</key><string>15</string>
   <key>LSUIElement</key><true/>
   <key>NSHighResolutionCapable</key><true/>
 </dict>
@@ -131,6 +140,10 @@ PLIST
 
 # Generated Python caches are not application assets.
 find "$RES_DIR" -type d -name __pycache__ -prune -exec rm -rf '{}' +
+# The installer puts this symlink on PATH. Check the real packaged entry point.
+mkdir "$staging_dir/cli-smoke"
+ln -s "../$APP_NAME.app/Contents/Resources/dbond" "$staging_dir/cli-smoke/dbond"
+"$staging_dir/cli-smoke/dbond" --help >/dev/null
 python3 "$ROOT/scripts/release_sign.py" sign --app "$APP_DIR"
 python3 "$ROOT/scripts/package_dot_runtime.py" --output "$RES_DIR/dot-runtime" --smoke-only
 if [[ -d "$ROOT/dist/$APP_NAME.app" ]]; then

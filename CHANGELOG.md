@@ -3,6 +3,13 @@
 Versions below refer to the macOS app; connector packages have their own version numbers.
 Historical tags preserve the public source for each app version. Earlier releases provide source archives.
 
+## 0.4.1 — 2026-11-14 · build 15
+
+- Separate agent chats, the shared Dot connection and workflow services in Connections. Removal and stop prompts explain what will stop working and how to restore it.
+- Include a credential-free, importable n8n workflow and a step-by-step Vollna guide for a new Mac or an existing webhook receiver.
+- Add an opt-in example for direct Claude–Codex messages between two local Backplane chats.
+- Fix the bundled CLI when launched from a symlink on the user’s PATH.
+
 ## 0.4.0 — 2026-11-14 · build 14
 
 - Set up the Dot MCP Events host from the Mac app. The app includes the host, Python runtime, durable message store and connector installers.
