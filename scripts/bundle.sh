@@ -73,6 +73,8 @@ HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 exec /bin/sh "$HERE/../../python-launch.sh" "$HERE/forward_job.py" "$@"
 SH
 chmod 755 "$AGENT_DIR/examples/vollna/forward-job"
+mkdir -p "$AGENT_DIR/examples/backplane"
+install -m 644 "$ROOT/examples/backplane/relay.py" "$ROOT/examples/backplane/README.md" "$AGENT_DIR/examples/backplane/"
 for module in dbond.py owner.py wake_registration.py codex_registration.py claude_registration.py; do
   install -m 644 "$ROOT/adapters/cli/$module" "$AGENT_DIR/adapters/cli/$module"
 done

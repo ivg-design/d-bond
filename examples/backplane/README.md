@@ -4,14 +4,14 @@ This optional relay delivers the original text and reply reference to a specific
 
 ## Connect one chat
 
-1. Run D-Bond and the Backplane hub under your Mac account. Install `uv` and keep the D-Bond checkout on this Mac. The example uses the CLI implementation in that checkout. Check your installed version with `uv --version`.
+1. Run D-Bond and the Backplane hub under your Mac account. Install `uv` and check it with `uv --version`. The example ships in the Mac app under **Contents → Resources → agent-installers → examples → backplane**. In Terminal, `cd` to **Contents/Resources/agent-installers** inside the app, or to the root of the D-Bond checkout. The commands below work from either location.
 2. In the Backplane project chat, ask the agent to use `thread_list` and give you the **Backplane thread ID** for its title and provider. Use a dedicated alias for each chat. In this example the first chat is Claude and its title is *Layout review*. Run this once in Terminal or from the agent’s shell on the same Mac.
 
    ```sh
    ~/.local/bin/dbond enroll bp-layout --service Claude --topic 'Backplane — Layout review' --destination peer
    ```
 
-3. In Backplane, open **Settings → Devices → Add a device** and get a short code. In Terminal, from the D-Bond checkout, run the command below with the actual loopback port and thread ID. The relay prompts privately for the code. It saves the issued device credential in your private D-Bond CLI directory and checks the target’s ID, provider and availability. `pair` with the same arguments reuses the saved device. A Backplane device has native client access to the hub. This example limits its own sends to the one recorded project thread.
+3. In Backplane, open **Settings → Devices → Add a device** and get a short code. In Terminal, run the command below with the actual loopback port and thread ID. The relay prompts privately for the code. It saves the issued device credential in your private D-Bond CLI directory and checks the target’s ID, provider and availability. `pair` with the same arguments reuses the saved device. A Backplane device has native client access to the hub. This example limits its own sends to the one recorded project thread.
 
    ```sh
    uv run examples/backplane/relay.py pair bp-layout \

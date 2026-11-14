@@ -20,7 +20,30 @@ If you already have a watcher on the Mac, use the existing-watcher instructions 
 5. Click **Send test** in Vollna. A test can contain up to three **real recent jobs**. Keep the test-only rules until you have seen both the per-title entries and Dot's replies. For a dedicated test pairing, point the HTTP Request node at that pairing and switch both its endpoint and credential to the production pairing after validation. [Vollna’s n8n guide](https://www.vollna.com/docs/integrations/n8n)
 6. Publish the n8n workflow. Paste the node's **Production URL** in the Vollna notification, then save it. Where this webhook already exists, edit that notification to keep one sender. Keep the Mac awake and set your receiver and HTTPS proxy to start after restart. Verify the next *new* matching job as described below.
 
-The workflow reads the `projects` array in each POST and forwards one event per Upwork posting. It keeps the title, description, questions and other job fields, converts Vollna's tracked URL to a canonical job URL, and omits filter-tracking metadata. Each posting ID and content revision give it a repeatable D-Bond event ID. Replaying identical project content returns the stored receipt. Changed content produces a new revision; downstream draft and alert actions can use the job ID to find their earlier work. An unrecognized posting URL or missing title fails the execution so you can inspect the original delivery. The example configures n8n to retain failed executions. Set your own data retention and error notifications.
+### Example HTTPS route for a new Mac
+
+For a Mac that already accepts public HTTPS traffic, the following Caddy site forwards the two named webhook paths to native n8n. Replace the example hostname with one you control. It needs public DNS pointing to your reachable HTTPS server. For a Mac behind NAT, route incoming HTTPS to the proxy, or use an HTTPS relay that reaches the local receiver. A Mac behind carrier-grade NAT generally needs a relay or a publicly reachable server for this leg. [Caddy reverse proxy](https://caddyserver.com/docs/caddyfile/directives/reverse_proxy)
+
+```caddyfile
+intake.example.com {
+    @vollna {
+        method POST
+        path /webhook-test/vollna-jobs /webhook/vollna-jobs
+    }
+    handle @vollna {
+        reverse_proxy 127.0.0.1:5678
+    }
+    handle {
+        respond 404
+    }
+}
+```
+
+For this single-proxy setup, configure n8n with `N8N_LISTEN_ADDRESS=127.0.0.1`, `WEBHOOK_URL=https://intake.example.com/` and `N8N_PROXY_HOPS=1`. Open the editor locally. Test and production URLs will advertise the public hostname. This workflow was exercised with native n8n 2.47.7. That version flags native hosting as deprecated. Check native-host support when upgrading n8n or use the existing-watcher route below.
+
+### How batch delivery works
+
+The workflow reads the `projects` array in each POST and forwards one event per Upwork posting. It keeps the title, description, questions and other job fields, converts Vollna's tracked URL to a canonical job URL, and omits filter-tracking metadata. Each posting ID and content revision give it a repeatable D-Bond event ID. Replaying identical project content returns the stored receipt. Changed content produces a new revision. Downstream draft and alert actions can use the job ID to find their earlier work. An unrecognized posting URL or missing title fails the execution so you can inspect the original delivery. The example configures n8n to retain failed executions. Set your own data retention and error notifications.
 
 The webhook responds after D-Bond stores the batch. Dot reviews jobs asynchronously. Vollna's request timeout is ten seconds. For high-volume batches or outages, use a receiver with a durable queue: commit the complete batch, acknowledge it promptly, then forward each project with the same event ID on retry. If the Mac and its public route are offline, check Vollna and your receiver before assuming the job arrived. Vollna's job webhook guide does not promise an automatic redelivery schedule.
 
