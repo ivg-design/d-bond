@@ -287,7 +287,7 @@ async def command(args, root, settings, ingress, bridge_override=None):
             ORIGIN + "/mcp", "--mcp.extra-headers", "X-DBond-Probe: env:DBOND_PROBE_INGRESS",
             "--mcp.extra-headers", "X-DBond-Tunnel-Run: env:DBOND_PROBE_TUNNEL_RUN",
             "--health.listen-addr", "127.0.0.1:0", "--health.url-file", str(root / "tunnel-health.url"),
-            "--log.level", "warn", "--log.http-raw-unsafe=false"], env)
+            "--log.format", "json", "--log.level", "warn", "--log.http-raw-unsafe=false"], env)
     bridge = DotInbox(settings, webhook_post=openai_webhook)
     try:
         subs = await bridge.list_subscriptions()
