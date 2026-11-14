@@ -86,7 +86,11 @@ class SessionListenTests(unittest.TestCase):
             dbond.command_session_listen(types.SimpleNamespace(alias="review"))
         attach.assert_called_once_with("review", sid, pair)
         thread.assert_not_called()
-        self.assertEqual(json.loads(output.getvalue())["state"], "native_receiver_attached")
+        row = json.loads(output.getvalue())
+        self.assertEqual(row["state"], "native_receiver_attached")
+        self.assertTrue(row["receiver"]["ready"])
+        self.assertNotIn("wakeState", row)
+        self.assertNotIn("wake_verified", row.values())
 
     def test_other_or_unavailable_host_preserves_monitor_fallback(self):
         sid = "11111111-2222-3333-4444-555555555555"
@@ -107,7 +111,33 @@ class SessionListenTests(unittest.TestCase):
              patch.object(dbond, "_initiating_claude", return_value=(sid, "Title")), \
              contextlib.redirect_stdout(io.StringIO()) as output:
             self.assertTrue(dbond._migrate_claude_session_listener("review", {"client": "claude", "session_id": sid}))
-        self.assertEqual(json.loads(output.getvalue())["state"], "native_receiver_pending")
+        row = json.loads(output.getvalue())
+        self.assertEqual(row["state"], "native_receiver_starting")
+        self.assertEqual(row["receiver"], {"state": "starting", "ready": False})
+        self.assertEqual(row["verify_command"], "dbond session-status review")
+        self.assertNotIn("wakeState", row)
+        self.assertNotIn("wake_verified", row.values())
+
+    def test_native_receiver_preserves_exact_unready_state_and_reason(self):
+        sid = "11111111-2222-3333-4444-555555555555"
+        for state in ("connecting", "blocked", "waiting_existing_listener", "host_offline", "unconfirmed"):
+            receiver = {"state": state, "ready": False, "reason": "fixture_reason"}
+            attachment = {**receiver, "instruction": "redundant action", "verify_command": "duplicate command"}
+            with self.subTest(state=state), \
+                 patch.dict(sys.modules, {"claude_registration": types.SimpleNamespace(attach=lambda *a: attachment)}), \
+                 patch.object(dbond, "_initiating_claude", return_value=(sid, "Title")), \
+                 patch.object(dbond.threading, "Thread") as thread, contextlib.redirect_stdout(io.StringIO()) as output:
+                self.assertTrue(dbond._migrate_claude_session_listener("review", {"client": "claude", "session_id": sid}))
+            thread.assert_not_called()
+            row = json.loads(output.getvalue())
+            self.assertEqual(row["state"], "native_receiver_" + state)
+            self.assertEqual(row["receiver"], receiver)
+            self.assertFalse(row["receiver"]["ready"])
+            self.assertNotIn("instruction", row["receiver"])
+            self.assertNotIn("verify_command", row["receiver"])
+            self.assertEqual(row["verify_command"], "dbond session-status review")
+            self.assertNotIn("wakeState", row)
+            self.assertNotIn("wake_verified", row.values())
 
     def test_combined_stream_and_replay_after_absence(self):
         fixture = MonitorFixture()

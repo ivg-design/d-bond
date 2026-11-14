@@ -36,6 +36,32 @@ def native_channel_opted_in(session_id):
         return False
 
 
+def status(session_id):
+    """Read one exact receiver health snapshot without attaching or waking it."""
+    if (not isinstance(session_id, str)
+            or not re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", session_id)):
+        return {"state": "blocked", "ready": False, "reason": "invalid_session_id"}
+    helper = _helper()
+    if helper is None:
+        return {"state": "not_installed", "ready": False, "reason": "native_receiver_not_installed"}
+    try:
+        process = subprocess.run([sys.executable, "-B", str(helper), "status", "--thread-id", session_id, "--json"],
+                                 stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=5, check=False)
+        value = json.loads(process.stdout)
+        if (not isinstance(value, dict) or (process.returncode != 0
+                and (value.get("state") not in ("blocked", "unsupported") or value.get("ready") is not False))):
+            raise ValueError("Invalid receiver health")
+        result = {key: value[key] for key in ("state", "reason", "ready", "native", "inbox_supported",
+                  "socket_verified", "receiver_kind", "last_delivery_state") if key in value}
+        result.setdefault("state", "unconfirmed")
+        result["ready"] = result.get("ready") is True and result.get("native") is True and result.get("inbox_supported") is True
+        result["thread_id"] = session_id
+        result["evidence"] = "native_receiver_health_snapshot"
+        return result
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return {"state": "unconfirmed", "ready": False, "reason": "native_receiver_health_unavailable"}
+
+
 def attach(alias, session_id, pairing=None):
     if (not isinstance(session_id, str)
             or not re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", session_id)

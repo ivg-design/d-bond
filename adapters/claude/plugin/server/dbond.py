@@ -1161,7 +1161,16 @@ def _session_status_readonly(alias: str) -> dict:
 
 
 def command_session_status(args) -> None:
-    print(json.dumps(session_status(args.alias, finish_registration=args.finish_registration), ensure_ascii=False))
+    result = session_status(args.alias, finish_registration=args.finish_registration)
+    pairing = _read_pairing(args.alias)
+    if pairing.get("client") == "claude" and pairing.get("session_id"):
+        try:
+            from claude_registration import status as receiver_status
+            result["receiver"] = receiver_status(pairing["session_id"])
+        except (ImportError, OSError, ValueError):
+            result["receiver"] = {"state": "unconfirmed", "ready": False,
+                                  "reason": "native_receiver_health_unavailable"}
+    print(json.dumps(result, ensure_ascii=False))
 
 
 def _session_row(event: dict, *, direct: bool, alias: str, service_id: str, cursor: int) -> dict | None:
@@ -1284,9 +1293,14 @@ def _migrate_claude_session_listener(alias: str, pairing: dict) -> bool:
                                               or listener.get("reason") == "native_receiver_not_installed"):
         return False
     ready = listener.get("ready") is True
-    print(json.dumps({"state": "native_receiver_attached" if ready else "native_receiver_pending", "alias": alias,
-                      "instruction": "The exact Claude host receiver owns incoming messages. This temporary Monitor can end; do not rearm it."
-                      if ready else "The exact Claude receiver is pending or blocked. Check its status before starting another consumer; do not report connected."}), flush=True)
+    receiver_state = listener.get("state", "unconfirmed")
+    instruction = ("End this temporary Monitor; the native receiver is attached." if ready
+                   else "Check receiver attachment with the verify command.")
+    receiver = {key: value for key, value in listener.items() if key not in ("instruction", "verify_command")}
+    print(json.dumps({"state": "native_receiver_attached" if ready else f"native_receiver_{receiver_state}",
+                      "alias": alias, "receiver": receiver,
+                      "verify_command": f"dbond session-status {alias}",
+                      "instruction": instruction}), flush=True)
     return True
 
 

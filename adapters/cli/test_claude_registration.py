@@ -1,5 +1,7 @@
 """Native Claude attachment fixtures; never contact a host or broker."""
 import json
+import contextlib
+import io
 import tempfile
 import unittest
 from pathlib import Path
@@ -58,6 +60,70 @@ class ClaudeRegistrationTests(unittest.TestCase):
             result.pop("inbox_supported")
             run.return_value.stdout = json.dumps(result)
             self.assertFalse(registration.attach("agent", SESSION)["ready"])
+
+    def test_status_reads_health_once_without_installing_or_disclosing_private_fields(self):
+        result = {"state": "listening", "ready": True, "native": True, "inbox_supported": True,
+                  "socket_verified": True, "pid": 123, "token": "private", "worker_start": "private"}
+        with patch.object(registration, "_helper", return_value=Path("/fixture/listener.py")), \
+             patch.object(registration.subprocess, "run") as run:
+            run.return_value = types.SimpleNamespace(stdout=json.dumps(result), returncode=0)
+            value = registration.status(SESSION)
+        run.assert_called_once()
+        self.assertEqual(run.call_args.args[0][3:], ["status", "--thread-id", SESSION, "--json"])
+        self.assertTrue(value["ready"])
+        self.assertEqual(value["state"], "listening")
+        self.assertFalse({"pid", "token", "worker_start"} & value.keys())
+        self.assertNotIn("wakeState", value)
+        self.assertEqual(value["evidence"], "native_receiver_health_snapshot")
+
+    def test_status_failure_and_missing_capability_are_not_ready(self):
+        with patch.object(registration, "_helper", return_value=Path("/fixture/listener.py")), \
+             patch.object(registration.subprocess, "run") as run:
+            for result, code in (({"state": "listening", "ready": True, "native": True}, 0),
+                                 ({"state": "listening", "ready": True, "native": True, "inbox_supported": True}, 1)):
+                run.return_value = types.SimpleNamespace(stdout=json.dumps(result), returncode=code)
+                self.assertFalse(registration.status(SESSION)["ready"])
+
+    def test_session_status_reports_health_separately_from_subscribers_and_wake(self):
+        pairing = {"client": "claude", "session_id": SESSION}
+        owner = {"state": "subscriber_present", "wakeState": "pending"}
+        receiver = {"state": "listening", "ready": True}
+        with patch.object(dbond, "_read_pairing", return_value=pairing), \
+             patch.object(dbond, "_session_status_readonly", return_value=owner.copy()), \
+             patch.object(registration, "status", return_value=receiver) as status, \
+             patch.object(dbond, "_owner_request") as request:
+            # Internal status stays cheap; only the requested CLI display reads health.
+            self.assertEqual(dbond.session_status("agent"), owner)
+            status.assert_not_called()
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                dbond.command_session_status(types.SimpleNamespace(alias="agent", finish_registration=False))
+            result = json.loads(output.getvalue())
+        status.assert_called_once_with(SESSION)
+        request.assert_not_called()
+        self.assertEqual(result, {**owner, "receiver": receiver})
+
+    def test_missing_health_helper_preserves_owner_status(self):
+        owner = {"state": "unknown", "evidence": "owner_socket_unavailable"}
+        with patch.object(dbond, "_read_pairing", return_value={"client": "claude", "session_id": SESSION}), \
+             patch.object(dbond, "session_status", return_value=owner.copy()), \
+             patch.object(registration, "_helper", return_value=None), \
+             contextlib.redirect_stdout(io.StringIO()) as output:
+            dbond.command_session_status(types.SimpleNamespace(alias="agent", finish_registration=False))
+        result = json.loads(output.getvalue())
+        self.assertEqual(result["state"], owner["state"])
+        self.assertEqual(result["evidence"], owner["evidence"])
+        self.assertEqual(result["receiver"]["state"], "not_installed")
+        self.assertFalse(result["receiver"]["ready"])
+
+    def test_status_preserves_blocked_health_reason(self):
+        with patch.object(registration, "_helper", return_value=Path("/fixture/listener.py")), \
+             patch.object(registration.subprocess, "run") as run:
+            run.return_value = types.SimpleNamespace(stdout=json.dumps({"state": "blocked", "ready": False,
+                                                                       "reason": "fixture_block", "detail": "private"}), returncode=1)
+            result = registration.status(SESSION)
+        self.assertEqual(result["state"], "blocked")
+        self.assertEqual(result["reason"], "fixture_block")
+        self.assertNotIn("detail", result)
 
     def test_uncertain_host_cannot_fall_back_as_unsupported(self):
         with patch.object(registration, "_helper", return_value=Path("/fixture/listener.py")), \

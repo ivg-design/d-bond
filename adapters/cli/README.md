@@ -108,7 +108,15 @@ row has `state:"dot_push"`, `alias`, `source_id:"@dot:<sequence>"`,
 closed Monitor can replay from the same IDs on restart. A direct-only pairing
 opens only the direct stream. `session-status` reports the owner-observed
 direct/Dot subscriber counts and separate `wakeState`. Ordinary status is
-read-only. In the registration turn, call `--finish-registration` **after**
+read-only. For a bound Claude session it also includes a single `receiver`
+health snapshot with the exact state, readiness and any reason; this does not
+install, refresh, poll or wake the receiver. A Claude `session-listen` handoff
+reports `native_receiver_starting`, `native_receiver_connecting`,
+`native_receiver_blocked`, or the other exact receiver state while unready;
+`native_receiver_attached` means the receiver confirmed attachment. Its
+`receiver` object preserves the health details and `verify_command` reads the
+current status. A starting response is not a blocked receiver or a verified
+model wake. In the registration turn, call `--finish-registration` **after**
 the listener attaches, then end setup immediately. It schedules one delayed
 owner proof for a later turn; repeated finish requests are broker-idempotent.
 The recipient runs `dbond wake-ack <alias> <sequence>` with the sequence
